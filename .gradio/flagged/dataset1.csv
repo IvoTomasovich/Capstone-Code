@@ -1,0 +1,26 @@
+Upload JSON Transcripts or PDFs,Ask a question about your documents,Answer,timestamp
+"["".gradio/flagged/Upload JSON Transcripts or PDFs/ce29449891e16fe3a467/cityofno_fbab1428-e5a4-4a80-a818-4e520485792d 1.json""]",What time does the meeting start?," To find the starting time of each segment, you can look at the ""start"" key in each object. However, the provided data is not a JSON array but a string containing multiple JSON objects. Here's how to extract the starting times:
+
+```python
+import json
+
+# Assuming the given string is stored in a variable named data_str
+data = json.loads(data_str)
+
+starting_times = []
+for obj in data:
+    starting_times.append(obj[""start""])
+
+print(starting_times)
+```
+
+The output will be a list of starting times in seconds. To convert these seconds to minutes and hours, you can use the `datetime` module:
+
+```python
+from datetime import timedelta
+
+# Convert seconds to minutes and hours (assuming ""start"" is a list of seconds)
+minutes_hours = [timedelta(seconds=s).total_seconds() // 60 for s in starting_times]
+print(minutes_hours)
+```",2025-10-16 12:01:00.982762
+"["".gradio/flagged/Upload JSON Transcripts or PDFs/78719e18a0e32224204d/cityofno_fbab1428-e5a4-4a80-a818-4e520485792d 1.json""]","The json file I attached mentions when the meeting started, so tell me, at what time did the meeting start?", The meeting started at 6330.08 seconds as per the document with ID 947 in the provided json file.,2025-10-16 13:26:30.185015
