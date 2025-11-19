@@ -16,7 +16,7 @@ import os
 import shutil
 
 
-def load_english_dictionary(path='put_actual_path'):
+def load_english_dictionary(path='insert_path'):
     """Load English dictionary and convert to lowercase set for fast lookup"""
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -37,7 +37,7 @@ def load_english_dictionary(path='put_actual_path'):
         return set()
 
 
-def load_custom_glossary(path='put_actual_path'):
+def load_custom_glossary(path='path'):
     """Load custom names/streets glossary"""
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -193,34 +193,68 @@ def is_false_positive_pattern(original, corrected, position, words):
     return False
 
 
+def enhanced_similarity_score(word1, word2):
+    """
+    Calculate similarity with:
+    1. Vowel-swap leniency (for same-length words)
+    2. Short-word boost (for words ≤4 characters)
+    """
+    vowels = set('aeiou')
+    base_score = similarity_score(word1, word2)
+    
+    # SPECIAL CASE: Short words (≤4 characters) get extra leniency
+    if len(word1) <= 5 and len(word2) <= 5:
+        # If they differ by only 1 character in length, boost score
+        if abs(len(word1) - len(word2)) <= 1:
+            # Check if they're similar enough (at least 50% match)
+            if base_score >= 0.50:
+                boosted_score = min(base_score + 0.15, 0.98)
+                print(f"   🔤 Short-word boost: '{word1}' vs '{word2}' ({base_score:.2f} → {boosted_score:.2f})")
+                return boosted_score
+    
+    # STANDARD CASE: Same-length words with vowel swaps
+    if len(word1) == len(word2):
+        differences = sum(1 for c1, c2 in zip(word1.lower(), word2.lower()) if c1 != c2)
+        
+        if differences <= 2:
+            vowel_swaps = 0
+            for c1, c2 in zip(word1.lower(), word2.lower()):
+                if c1 != c2 and c1 in vowels and c2 in vowels:
+                    vowel_swaps += 1
+            
+            if vowel_swaps == differences:
+                boosted_score = min(base_score + 0.10, 0.98)
+                print(f"   🔤 Vowel-swap boost: '{word1}' vs '{word2}' ({base_score:.2f} → {boosted_score:.2f})")
+                return boosted_score
+    
+    return base_score
+
+
 def validate_against_glossary(text, custom_glossary):
     """
-    STAGE 3: Context-aware glossary validation with SEPARATED NAME/STREET LOGIC
+    STAGE 3: Context-aware glossary validation with:
+    - Word insertion prevention
+    - Improved categorization
+    - Vowel-swap leniency
     """
     print("\n🔒 STAGE 3: Context-Aware Glossary Validation")
     
-    # NEW: Categorize glossary terms
+    # Categorize glossary terms (use FULL terms only)
     person_names = set()
-    street_names = set()
+    street_full_names = {}
     
-    # Common street indicators
     street_indicators = {'street', 'avenue', 'boulevard', 'road', 'lane', 
                         'drive', 'court', 'place', 'way', 'parkway', 'circle'}
     
     for term in custom_glossary:
         term_lower = term.lower()
-        # If term contains street indicator, it's a street
+        
         if any(indicator in term_lower for indicator in street_indicators):
-            # Extract the street name without the indicator
-            street_name = term_lower
-            for indicator in street_indicators:
-                street_name = street_name.replace(f' {indicator}', '')
-            street_names.add(street_name.strip())
+            street_full_names[term_lower] = term
         else:
-            # Otherwise, treat as person name
             person_names.add(term_lower)
     
-    print(f"   📊 Categorized: {len(person_names)} person names, {len(street_names)} street names")
+    print(f"   📊 Categorized: {len(person_names)} person names, {len(street_full_names)} street names")
     
     # Create lookup maps
     glossary_lower_map = {}
@@ -262,7 +296,7 @@ def validate_against_glossary(text, custom_glossary):
         
         corrected = False
         
-        # NEW: Determine if this is a person name or street name context
+        # Determine context
         is_person_context = False
         is_street_context = False
         
@@ -279,13 +313,12 @@ def validate_against_glossary(text, custom_glossary):
             if next_word in street_indicators:
                 is_street_context = True
         
-        # Check 1: Exact match (case-insensitive)
+        # Check 1: Exact match
         if word_lower in glossary_lower_map:
             correct_term = glossary_lower_map[word_lower]
             corrected_word = prefix_punct + correct_term + suffix_punct
             
             if corrected_word != word:
-                # NEW: Check if this would be a false positive
                 if not is_false_positive_pattern(word, corrected_word, i, words):
                     validation_corrections.append({
                         'position': i,
@@ -299,30 +332,30 @@ def validate_against_glossary(text, custom_glossary):
         
         # Check 2: Context-aware fuzzy matching
         if not corrected:
-            # NEW: Filter glossary based on context
+            # Filter candidates based on context
             if is_person_context:
-                # Only use person names glossary
                 candidates = {k: v for k, v in glossary_fuzzy_map.items() 
                              if k in person_names}
             elif is_street_context:
-                # Only use street names glossary
-                candidates = {k: v for k, v in glossary_fuzzy_map.items() 
-                             if k in street_names or any(ind in k for ind in street_indicators)}
+                candidates = street_full_names
             else:
-                # Use full glossary
                 candidates = glossary_fuzzy_map
             
             # Short word handling
             if len(word_clean) <= 4 and len(word_clean) >= 2 and is_person_context:
                 for glossary_term_lower, glossary_term in short_word_glossary.items():
                     if glossary_term_lower in candidates:
-                        score = similarity_score(word_lower, glossary_term_lower)
+                        score = enhanced_similarity_score(word_lower, glossary_term_lower)
                         
                         if score >= 0.75:
                             corrected_word = prefix_punct + glossary_term + suffix_punct
                             
+                            # NEW: Check word count
+                            if len(corrected_word.split()) > len(word.split()):
+                                print(f"   🚫 BLOCKED word insertion: '{word}' → '{corrected_word}'")
+                                continue
+                            
                             if corrected_word != word:
-                                # NEW: Check confidence and false positive
                                 if should_apply_correction(word_clean, glossary_term, score, 'person'):
                                     if not is_false_positive_pattern(word, corrected_word, i, words):
                                         validation_corrections.append({
@@ -340,14 +373,18 @@ def validate_against_glossary(text, custom_glossary):
             if not corrected and len(word_clean) > 4:
                 for glossary_term_lower, glossary_term in candidates.items():
                     if abs(len(word_lower) - len(glossary_term_lower)) <= 2:
-                        score = similarity_score(word_lower, glossary_term_lower)
+                        score = enhanced_similarity_score(word_lower, glossary_term_lower)
                         
-                        # Use higher threshold to prevent over-correction
-                        if score >= 0.92:
+                        # Lower threshold from 0.92 to 0.85 to catch Morino→Moreno
+                        if score >= 0.85:
                             corrected_word = prefix_punct + glossary_term + suffix_punct
                             
+                            # NEW: Check word count
+                            if len(corrected_word.split()) > len(word.split()):
+                                print(f"   🚫 BLOCKED word insertion: '{word}' → '{corrected_word}'")
+                                continue
+                            
                             if corrected_word != word:
-                                # NEW: Check confidence and false positive
                                 context_type = "person" if is_person_context else "street" if is_street_context else "general"
                                 if should_apply_correction(word_clean, glossary_term, score, context_type):
                                     if not is_false_positive_pattern(word, corrected_word, i, words):
@@ -361,10 +398,6 @@ def validate_against_glossary(text, custom_glossary):
                                         validated_words.append(corrected_word)
                                         corrected = True
                                         break
-                                    else:
-                                        print(f"   ⚠️ Skipped false positive: '{word}' → '{corrected_word}'")
-                                else:
-                                    print(f"   ⚠️ Skipped low-confidence correction: '{word}' → '{corrected_word}' (score={score:.2f})")
         
         if not corrected:
             validated_words.append(word)
@@ -400,7 +433,7 @@ def validate_against_glossary(text, custom_glossary):
 
 def llm_correct_transcript(text, custom_glossary, model="mistral"):
     """
-    STAGE 2: LLM context-aware correction with IMPROVED prompt
+    STAGE 2: LLM context-aware correction with WORD INSERTION PREVENTION
     """
     
     print("\n🤖 STAGE 2: LLM Context-Aware Correction")
@@ -419,7 +452,7 @@ def llm_correct_transcript(text, custom_glossary, model="mistral"):
     if len(text) > 3500:
         return llm_correct_in_chunks(text, custom_glossary, llm)
     
-    # IMPROVED PROMPT - More explicit about glossary authority
+    # IMPROVED PROMPT - Prevents word insertion
     template = """You are a transcription correction assistant for New Orleans City Council meeting transcripts.
 
 GLOSSARY (THESE ARE THE **ONLY** VALID SPELLINGS - DO NOT DEVIATE):
@@ -429,17 +462,27 @@ GLOSSARY (THESE ARE THE **ONLY** VALID SPELLINGS - DO NOT DEVIATE):
 1. The glossary contains the ONLY correct spellings - DO NOT use your own knowledge
 2. If a word in a name context is similar to a glossary term, change it to the EXACT glossary spelling
 3. DO NOT "improve" glossary spellings - use them exactly as written
-4. Examples of REQUIRED corrections based on glossary:
-   - "Witrey" → "Witry" (glossary spelling, NOT "Witrey")
-   - "Stuart" → "Stewart" (glossary spelling, NOT "Stuart")
-   - "Terral" → "Terrell" (glossary spelling)
-   - "Stuard" → "Stewart" (glossary spelling)
-   - "Morino" → "Moreno" (glossary spelling)
-   - "Wiegand" → "Weigand" (glossary spelling)
+4. **NEVER INSERT WORDS THAT AREN'T IN THE ORIGINAL TEXT**
+5. **If a glossary entry has multiple words (e.g., "Wildair Drive"), only use it if ALL words appear in the original**
+6. **WORD-FOR-WORD REPLACEMENT ONLY** - Do not add, remove, or rearrange words
+
+EXAMPLES OF WHAT NOT TO DO:
+❌ "Cyndi Willard Lewis" → "Cyndi Wildair Drive Lewis" (WRONG - inserted "Drive")
+❌ "Hans Exposah" → "Hans Esposa-Lewis" (WRONG - inserted "-Lewis" when not in original)
+❌ "Donna Glapeon" → "Donna Claiborne" (WRONG - changed last name to street name)
+✅ "Cyndi Willard Lewis" → "Cyndi Willard Lewis" (CORRECT - keep as-is if no exact match)
+✅ "Hans Exposah Lewis" → "Hans Esposa Lewis" (CORRECT - only fix the misspelled part)
+
+EXAMPLES OF CORRECT CORRECTIONS:
+✓ "Morino" → "Moreno" (single-word correction)
+✓ "Helaina" → "Helena" (single-word correction)
+✓ "Wittry" → "Witry" (single-word correction)
+✓ "Cannal Street" → "Canal Street" (each word corrected independently)
+✓ "Tchopitoulous Street" → "Tchoupitoulas Street" (each word corrected independently)
 
 NAME CONTEXT INDICATORS (when to apply corrections):
 ✓ After titles: Mayor, Councilmember, Commissioner, Dr., Mr., Mrs., Ms., Senator, Representative, Pastor, Chair, Vice Chair, Chairwoman
-✓ After first names: Elizabeth, Katie, Robert, Jonathan, Kelly, Joseph, Helena, Oliver, Kristin, Lindsay, Hans
+✓ After first names: Elizabeth, Katie, Robert, Jonathan, Kelly, Joseph, Helena, Oliver, Kristin, Lindsay, Hans, Cyndi, Donna
 ✓ Before street indicators: Street, Avenue, Boulevard, Road, Lane, Drive, Court, Place, Way
 ✓ When capitalized mid-sentence (likely a proper noun)
 
@@ -453,9 +496,10 @@ PROTECTED COMMON WORDS (DO NOT change these):
 CORRECTION STRATEGY:
 1. Is the word in a name context?
 2. Is it similar to a glossary term (even 1-2 letters different)?
-3. If YES to both → Change to EXACT glossary spelling
-4. If it's a protected common word → Leave unchanged
-5. When in doubt → Use glossary spelling if there's any match
+3. Does the glossary term have the SAME NUMBER OF WORDS as the original?
+4. If YES to all → Change to EXACT glossary spelling
+5. If NO to any → Leave unchanged
+6. When in doubt → Leave unchanged (better to miss an error than create a false positive)
 
 TRANSCRIPT TO CORRECT:
 {text}
@@ -476,6 +520,14 @@ CORRECTED TRANSCRIPT (output ONLY the corrected text, no explanations):"""
         corrected_words = corrected_text.split()
         changes = sum(1 for o, c in zip(original_words, corrected_words) if o.lower() != c.lower())
         
+        # NEW: Sanity check for word count
+        original_word_count = len(original_words)
+        corrected_word_count = len(corrected_words)
+        
+        if corrected_word_count > original_word_count + 5:
+            print(f"   ⚠️ WARNING: LLM added {corrected_word_count - original_word_count} words!")
+            print(f"   Original: {original_word_count} words, Corrected: {corrected_word_count} words")
+        
         print(f"   ✅ LLM made approximately {changes} corrections")
         
         return corrected_text
@@ -486,7 +538,7 @@ CORRECTED TRANSCRIPT (output ONLY the corrected text, no explanations):"""
 
 
 def llm_correct_in_chunks(text, custom_glossary, llm, chunk_size=3000):
-    """Process long transcripts with improved LLM correction"""
+    """Process long transcripts with improved LLM correction and word insertion prevention"""
     print("   📄 Processing long transcript in chunks...")
     
     words = text.split()
@@ -498,25 +550,36 @@ def llm_correct_in_chunks(text, custom_glossary, llm, chunk_size=3000):
     
     glossary_str = ", ".join(custom_glossary[:150])
     
+    # SAME IMPROVED TEMPLATE for chunks
     template = """You are a transcription correction assistant.
 
 GLOSSARY (ONLY VALID SPELLINGS - DO NOT DEVIATE):
 {glossary}
 
-🚨 CRITICAL: Use EXACT glossary spellings. Do not "improve" them.
+🚨 CRITICAL RULES:
+1. Use EXACT glossary spellings
+2. **NEVER INSERT WORDS THAT AREN'T IN THE ORIGINAL TEXT**
+3. **If a glossary entry has multiple words, only use it if ALL words appear in the original**
+4. **WORD-FOR-WORD REPLACEMENT ONLY**
+
+EXAMPLES OF WHAT NOT TO DO:
+❌ "Willard" → "Wildair Drive" (WRONG - inserted "Drive")
+❌ "Exposah" → "Esposa-Lewis" (WRONG - inserted "-Lewis")
+✅ "Willard" → "Willard" (CORRECT - keep as-is if no exact match)
 
 REQUIRED CORRECTIONS:
-- "Witrey" → "Witry" (glossary spelling)
-- "Stuart" → "Stewart" (glossary spelling)
-- "Terral" → "Terrell" (glossary spelling)
+- "Morino" → "Moreno" (vowel swap)
+- "Witrey" → "Witry" (remove extra letter)
+- "Helaina" → "Helena" (vowel correction)
+- "Cannal" → "Canal" (remove double letter)
 
 PROTECTED PHRASES:
-- "the weekend", "more information", "second motion"
+- "the weekend", "more information", "second motion", "representing", "community"
 
 TRANSCRIPT CHUNK:
 {text}
 
-CORRECTED CHUNK:"""
+CORRECTED CHUNK (output ONLY the corrected text):"""
     
     prompt = ChatPromptTemplate.from_template(template)
     chain = prompt | llm | StrOutputParser()
@@ -681,7 +744,7 @@ def needs_name_check(word, position, words, english_dict):
     
     # EXPANDED protected words list
     protected_words = {
-        'mayor', 'councilmember', 'councilwoman', 'councilman',
+        'mayor', 'councilmember', 'councilwoman', 'councilman', 'board',
         'commissioner', 'senator', 'representative', 'president',
         'vice', 'chair', 'chairman', 'chairwoman', 'pastor',
         'mr', 'mrs', 'ms', 'dr', 'prof', 'professor',
