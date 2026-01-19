@@ -14,959 +14,434 @@ from difflib import SequenceMatcher
 from datetime import datetime
 import os
 import shutil
+from typing import Dict, List, Tuple, Optional
 
 
-def load_english_dictionary(path='insert_path'):
-    """Load English dictionary and convert to lowercase set for fast lookup"""
+# ============================================================================
+# DICTIONARY LOADING
+# ============================================================================
+
+def load_dictionaries():
+    """Load 3 specialized dictionaries"""
+    
+    # 1. English common words
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            words = json.load(f)
-        english_set = set(word.lower() for word in words)
-        
-        print("\n🔍 Checking for common words in English dictionary:")
-        common_words = ['has', 'have', 'had', 'was', 'were', 'seconded', 'the', 'a', 'an', 'weekend', 'on', 'behalf']
-        for word in common_words:
-            if word not in english_set:
-                print(f"   ⚠️ MISSING: '{word}'")
-            else:
-                print(f"   ✓ Found: '{word}'")
-        
-        return english_set
+        with open('words_dictionary.json', 'r', encoding='utf-8') as f:
+            english_words = set(word.lower() for word in json.load(f))
+        print(f"✅ Loaded {len(english_words)} English words")
     except FileNotFoundError:
-        print(f"⚠️ English dictionary not found at {path}")
-        return set()
-
-
-def load_custom_glossary(path='path'):
-    """Load custom names/streets glossary"""
+        print("⚠️ words_dictionary.json not found - using minimal set")
+        english_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'has', 'have', 'had',
+            'was', 'were', 'been', 'is', 'are', 'weekend', 'seconded',
+            'representing', 'resident', 'community', 'on', 'behalf'
+        }
+    
+    # 2. New Orleans names (format: {"first_names": [...], "last_names": [...]})
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            words = json.load(f)
-        print(f"✅ Loaded {len(words)} custom terms")
+        with open('nola_names.json', 'r', encoding='utf-8') as f:
+            names_data = json.load(f)
         
-        print("\n🔍 Checking for expected names in glossary:")
-        test_names = ['Moreno', 'Mariano', 'Quarter', 'Tchoupitoulas', 'Palmer', 'Cantrell', 
-                     'Terrell', 'Weigand', 'Witry', 'Thomas', 'Bouton', 'Flick']
-        for name in test_names:
-            matches = [g for g in words if name.lower() in g.lower()]
-            print(f"   '{name}': {matches[:3] if matches else 'NOT FOUND'}")
+        first_names = names_data.get('first_names', [])
+        last_names = names_data.get('last_names', [])
+        names = first_names + last_names
         
-        return words
+        print(f"✅ Loaded {len(first_names)} first names and {len(last_names)} last names")
+        print(f"   Total: {len(names)} name entries")
     except FileNotFoundError:
-        print(f"⚠️ Custom glossary not found at {path}")
-        return []
-
-
-def similarity_score(a, b):
-    """Calculate similarity between two strings (0-1 scale)"""
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-def validate_titles_and_common_terms(text):
-    """
-    Pre-Stage 3: Fix common title and term errors
-    """
-    print("\n🎯 PRE-STAGE 3: Title and Common Term Validation")
-    print(f"   Input text length: {len(text)} characters")
+        print("⚠️ nola_names.json not found - using sample set")
+        names = ["Moreno", "Palmer", "Cantrell", "Helena"]
+        first_names = []
+        last_names = []
     
-    corrections_made = []
-    corrected_text = text
-    
-    # Define all correction patterns
-    title_fixes = {
-        # Commission → Commissioner
-        r'\bCommission\s+([A-Z][a-z]+)': r'Commissioner \1',
-        
-        # Stuart → Stewart (in name contexts)
-        r'\b(Representative|Ms\.|Mr\.|Dr\.)\s+Stuart\b': r'\1 Stewart',
-        r'\bStuart\s+(Avenue|Street|Boulevard|Road|Lane|Drive)\b': r'Stewart \1',
-        
-        # Stuard → Stewart
-        r'\b(Ms\.|Mr\.|Dr\.)\s+Stuard\b': r'\1 Stewart',
-        
-        # Arnod → Arnaud
-        r'\bArnod\s+(community|center|street|avenue)\b': r'Arnaud \1',
-        
-        # Algeerz → Algiers
-        r'\bAlgeerz\b': 'Algiers',
-        
-        # Other title fixes
-        r'\bCouncil\s+member\b': 'Councilmember',
-        r'\bVice\s+chair\b': 'Vice Chair',
-        r'\bChair\s+woman\b': 'Chairwoman',
-        r'\bChair\s+man\b': 'Chairman',
-    }
-    
-    for pattern, replacement in title_fixes.items():
-        matches = list(re.finditer(pattern, corrected_text, re.IGNORECASE))
-        if matches:
-            print(f"   Found {len(matches)} matches for pattern: {pattern}")
-            for match in matches:
-                original = match.group(0)
-                # Handle backreferences properly
-                if r'\1' in replacement:
-                    new_text = re.sub(pattern, replacement, original, flags=re.IGNORECASE)
-                else:
-                    new_text = replacement
-                
-                corrections_made.append({
-                    'original': original,
-                    'corrected': new_text,
-                    'position': match.start()
-                })
-            
-            corrected_text = re.sub(pattern, replacement, corrected_text, flags=re.IGNORECASE)
-    
-    if corrections_made:
-        print(f"   ✅ Fixed {len(corrections_made)} title/term errors")
-        for corr in corrections_made[:10]:
-            print(f"      '{corr['original']}' → '{corr['corrected']}'")
-        if len(corrections_made) > 10:
-            print(f"      ... and {len(corrections_made) - 10} more")
-    else:
-        print("   ✅ No title/term corrections needed")
-    
-    return corrected_text, corrections_made
-
-
-def should_apply_correction(original_word, corrected_word, confidence_score, context):
-    """
-    NEW: Determine if a correction should be applied based on confidence and context
-    """
-    # Never correct if confidence is too low
-    if confidence_score < 0.85:
-        return False
-    
-    # For person names after titles, require very high confidence
-    if context == 'person' and confidence_score < 0.92:
-        return False
-    
-    # If original word is capitalized and in middle of sentence, be cautious
-    if original_word and original_word[0].isupper() and confidence_score < 0.90:
-        return False
-    
-    # If correction changes more than 3 characters, require higher confidence
-    char_diff = sum(1 for a, b in zip(original_word, corrected_word) if a != b)
-    if char_diff > 3 and confidence_score < 0.95:
-        return False
-    
-    return True
-
-
-def is_false_positive_pattern(original, corrected, position, words):
-    """
-    NEW: Detect known false positive patterns that should NOT be corrected
-    """
-    original_lower = original.lower().strip('.,!?;:\'"()[]{}')
-    corrected_lower = corrected.lower().strip('.,!?;:\'"()[]{}')
-    
-    # Pattern 1: Don't change person names to street names
-    street_name_parts = ['claiborne', 'napoleon', 'canal', 'magazine', 
-                        'carrollton', 'esplanade', 'rampart', 'bourbon',
-                        'royal', 'chartres', 'decatur', 'toulouse', 'dauphine']
-    
-    if position > 0:
-        prev_word = words[position - 1].lower().strip('.,!?;:\'"()[]{}')
-        person_indicators = {'mr', 'mrs', 'ms', 'dr', 'pastor', 'councilmember',
-                           'commissioner', 'senator', 'representative', 'mayor'}
-        
-        # If previous word indicates a person name, don't use street names
-        if prev_word in person_indicators and corrected_lower in street_name_parts:
-            print(f"   🚫 Blocked false positive: '{original}' → '{corrected}' (street name in person context)")
-            return True
-    
-    # Pattern 2: Don't change last names that are similar to first names
-    if position > 1:
-        two_words_back = words[position - 2].lower().strip('.,!?;:\'"()[]{}')
-        one_word_back = words[position - 1].lower().strip('.,!?;:\'"()[]{}')
-        
-        # If pattern is "Title FirstName LastName", be very conservative
-        person_indicators = {'mr', 'mrs', 'ms', 'dr', 'pastor'}
-        common_first_names = {'donna', 'robert', 'katie', 'hans', 'eugene', 
-                            'joseph', 'lindsay', 'arnaud', 'mariano', 'cyndi',
-                            'elizabeth', 'jonathan', 'kathleen', 'kristin'}
-        
-        if two_words_back in person_indicators and one_word_back in common_first_names:
-            print(f"   🚫 Blocked false positive: '{original}' → '{corrected}' (last name after title + first name)")
-            return True
-    
-    return False
-
-
-def enhanced_similarity_score(word1, word2):
-    """
-    Calculate similarity with:
-    1. Vowel-swap leniency (for same-length words)
-    2. Short-word boost (for words ≤4 characters)
-    """
-    vowels = set('aeiou')
-    base_score = similarity_score(word1, word2)
-    
-    # SPECIAL CASE: Short words (≤4 characters) get extra leniency
-    if len(word1) <= 5 and len(word2) <= 5:
-        # If they differ by only 1 character in length, boost score
-        if abs(len(word1) - len(word2)) <= 1:
-            # Check if they're similar enough (at least 50% match)
-            if base_score >= 0.50:
-                boosted_score = min(base_score + 0.15, 0.98)
-                print(f"   🔤 Short-word boost: '{word1}' vs '{word2}' ({base_score:.2f} → {boosted_score:.2f})")
-                return boosted_score
-    
-    # STANDARD CASE: Same-length words with vowel swaps
-    if len(word1) == len(word2):
-        differences = sum(1 for c1, c2 in zip(word1.lower(), word2.lower()) if c1 != c2)
-        
-        if differences <= 2:
-            vowel_swaps = 0
-            for c1, c2 in zip(word1.lower(), word2.lower()):
-                if c1 != c2 and c1 in vowels and c2 in vowels:
-                    vowel_swaps += 1
-            
-            if vowel_swaps == differences:
-                boosted_score = min(base_score + 0.10, 0.98)
-                print(f"   🔤 Vowel-swap boost: '{word1}' vs '{word2}' ({base_score:.2f} → {boosted_score:.2f})")
-                return boosted_score
-    
-    return base_score
-
-
-def validate_against_glossary(text, custom_glossary):
-    """
-    STAGE 3: Context-aware glossary validation with:
-    - Word insertion prevention
-    - Improved categorization
-    - Vowel-swap leniency
-    """
-    print("\n🔒 STAGE 3: Context-Aware Glossary Validation")
-    
-    # Categorize glossary terms (use FULL terms only)
-    person_names = set()
-    street_full_names = {}
-    
-    street_indicators = {'street', 'avenue', 'boulevard', 'road', 'lane', 
-                        'drive', 'court', 'place', 'way', 'parkway', 'circle'}
-    
-    for term in custom_glossary:
-        term_lower = term.lower()
-        
-        if any(indicator in term_lower for indicator in street_indicators):
-            street_full_names[term_lower] = term
-        else:
-            person_names.add(term_lower)
-    
-    print(f"   📊 Categorized: {len(person_names)} person names, {len(street_full_names)} street names")
-    
-    # Create lookup maps
-    glossary_lower_map = {}
-    glossary_fuzzy_map = {}
-    short_word_glossary = {}
-    
-    for term in custom_glossary:
-        term_lower = term.lower()
-        
-        if term_lower not in glossary_lower_map:
-            glossary_lower_map[term_lower] = term
-        elif len(term) > 0 and term[0].isupper() and not term.isupper():
-            glossary_lower_map[term_lower] = term
-        
-        glossary_fuzzy_map[term_lower] = term
-        
-        if len(term) <= 4:
-            short_word_glossary[term_lower] = term
-    
-    words = text.split()
-    validated_words = []
-    validation_corrections = []
-    
-    for i, word in enumerate(words):
-        word_clean = word.strip('.,!?;:\'"()[]{}')
-        word_lower = word_clean.lower()
-        
-        # Preserve punctuation
-        prefix_punct = ''
-        suffix_punct = ''
-        temp_word = word
-        while temp_word and temp_word[0] in '.,!?;:\'"()[]{}':
-            prefix_punct += temp_word[0]
-            temp_word = temp_word[1:]
-        temp_word = word
-        while temp_word and temp_word[-1] in '.,!?;:\'"()[]{}':
-            suffix_punct = temp_word[-1] + suffix_punct
-            temp_word = temp_word[:-1]
-        
-        corrected = False
-        
-        # Determine context
-        is_person_context = False
-        is_street_context = False
-        
-        if i > 0:
-            prev_word = words[i - 1].lower().strip('.,!?;:\'"()[]{}')
-            person_indicators = {'councilmember', 'commissioner', 'mayor', 'senator',
-                               'representative', 'mr', 'mrs', 'ms', 'dr', 'pastor',
-                               'chair', 'chairman', 'chairwoman', 'vice'}
-            if prev_word in person_indicators:
-                is_person_context = True
-        
-        if i < len(words) - 1:
-            next_word = words[i + 1].lower().strip('.,!?;:\'"()[]{}')
-            if next_word in street_indicators:
-                is_street_context = True
-        
-        # Check 1: Exact match
-        if word_lower in glossary_lower_map:
-            correct_term = glossary_lower_map[word_lower]
-            corrected_word = prefix_punct + correct_term + suffix_punct
-            
-            if corrected_word != word:
-                if not is_false_positive_pattern(word, corrected_word, i, words):
-                    validation_corrections.append({
-                        'position': i,
-                        'original': word,
-                        'corrected': corrected_word,
-                        'reason': 'exact_match_enforcement',
-                        'confidence': 1.0
-                    })
-                    validated_words.append(corrected_word)
-                    corrected = True
-        
-        # Check 2: Context-aware fuzzy matching
-        if not corrected:
-            # Filter candidates based on context
-            if is_person_context:
-                candidates = {k: v for k, v in glossary_fuzzy_map.items() 
-                             if k in person_names}
-            elif is_street_context:
-                candidates = street_full_names
-            else:
-                candidates = glossary_fuzzy_map
-            
-            # Short word handling
-            if len(word_clean) <= 4 and len(word_clean) >= 2 and is_person_context:
-                for glossary_term_lower, glossary_term in short_word_glossary.items():
-                    if glossary_term_lower in candidates:
-                        score = enhanced_similarity_score(word_lower, glossary_term_lower)
-                        
-                        if score >= 0.75:
-                            corrected_word = prefix_punct + glossary_term + suffix_punct
-                            
-                            # NEW: Check word count
-                            if len(corrected_word.split()) > len(word.split()):
-                                print(f"   🚫 BLOCKED word insertion: '{word}' → '{corrected_word}'")
-                                continue
-                            
-                            if corrected_word != word:
-                                if should_apply_correction(word_clean, glossary_term, score, 'person'):
-                                    if not is_false_positive_pattern(word, corrected_word, i, words):
-                                        validation_corrections.append({
-                                            'position': i,
-                                            'original': word,
-                                            'corrected': corrected_word,
-                                            'reason': f'short_word_name_context (score={score:.2f})',
-                                            'confidence': score
-                                        })
-                                        validated_words.append(corrected_word)
-                                        corrected = True
-                                        break
-            
-            # Regular fuzzy match for longer words
-            if not corrected and len(word_clean) > 4:
-                for glossary_term_lower, glossary_term in candidates.items():
-                    if abs(len(word_lower) - len(glossary_term_lower)) <= 2:
-                        score = enhanced_similarity_score(word_lower, glossary_term_lower)
-                        
-                        # Lower threshold from 0.92 to 0.85 to catch Morino→Moreno
-                        if score >= 0.85:
-                            corrected_word = prefix_punct + glossary_term + suffix_punct
-                            
-                            # NEW: Check word count
-                            if len(corrected_word.split()) > len(word.split()):
-                                print(f"   🚫 BLOCKED word insertion: '{word}' → '{corrected_word}'")
-                                continue
-                            
-                            if corrected_word != word:
-                                context_type = "person" if is_person_context else "street" if is_street_context else "general"
-                                if should_apply_correction(word_clean, glossary_term, score, context_type):
-                                    if not is_false_positive_pattern(word, corrected_word, i, words):
-                                        validation_corrections.append({
-                                            'position': i,
-                                            'original': word,
-                                            'corrected': corrected_word,
-                                            'reason': f'context_aware_fuzzy (score={score:.2f}, context={context_type})',
-                                            'confidence': score
-                                        })
-                                        validated_words.append(corrected_word)
-                                        corrected = True
-                                        break
-        
-        if not corrected:
-            validated_words.append(word)
-    
-    validated_text = ' '.join(validated_words)
-    
-    if validation_corrections:
-        print(f"   ✅ Enforced {len(validation_corrections)} glossary corrections")
-        
-        short_word_corrections = [c for c in validation_corrections if 'short_word' in c['reason']]
-        context_corrections = [c for c in validation_corrections if 'context_aware' in c['reason']]
-        other_corrections = [c for c in validation_corrections if 'short_word' not in c['reason'] and 'context_aware' not in c['reason']]
-        
-        if short_word_corrections:
-            print(f"   📏 Short-word corrections ({len(short_word_corrections)}):")
-            for corr in short_word_corrections[:3]:
-                print(f"      '{corr['original']}' → '{corr['corrected']}' [{corr['reason']}]")
-        
-        if context_corrections:
-            print(f"   🎯 Context-aware corrections ({len(context_corrections)}):")
-            for corr in context_corrections[:3]:
-                print(f"      '{corr['original']}' → '{corr['corrected']}' [{corr['reason']}]")
-        
-        if other_corrections:
-            print(f"   🔧 Other corrections ({len(other_corrections)}):")
-            for corr in other_corrections[:3]:
-                print(f"      '{corr['original']}' → '{corr['corrected']}' [{corr['reason']}]")
-    else:
-        print("   ✅ No additional corrections needed")
-    
-    return validated_text, validation_corrections
-
-
-def llm_correct_transcript(text, custom_glossary, model="mistral"):
-    """
-    STAGE 2: LLM context-aware correction with WORD INSERTION PREVENTION
-    """
-    
-    print("\n🤖 STAGE 2: LLM Context-Aware Correction")
-    
-    # Prepare glossary (limit to 150 terms to fit in prompt)
-    glossary_str = ", ".join(custom_glossary[:150])
-    
-    # Initialize local model
-    llm = ChatOllama(
-        model=model,
-        temperature=0,
-        num_ctx=8192
-    )
-    
-    # Process in chunks if text is very long
-    if len(text) > 3500:
-        return llm_correct_in_chunks(text, custom_glossary, llm)
-    
-    # IMPROVED PROMPT - Prevents word insertion
-    template = """You are a transcription correction assistant for New Orleans City Council meeting transcripts.
-
-GLOSSARY (THESE ARE THE **ONLY** VALID SPELLINGS - DO NOT DEVIATE):
-{glossary}
-
-🚨 CRITICAL RULES:
-1. The glossary contains the ONLY correct spellings - DO NOT use your own knowledge
-2. If a word in a name context is similar to a glossary term, change it to the EXACT glossary spelling
-3. DO NOT "improve" glossary spellings - use them exactly as written
-4. **NEVER INSERT WORDS THAT AREN'T IN THE ORIGINAL TEXT**
-5. **If a glossary entry has multiple words (e.g., "Wildair Drive"), only use it if ALL words appear in the original**
-6. **WORD-FOR-WORD REPLACEMENT ONLY** - Do not add, remove, or rearrange words
-
-EXAMPLES OF WHAT NOT TO DO:
-❌ "Cyndi Willard Lewis" → "Cyndi Wildair Drive Lewis" (WRONG - inserted "Drive")
-❌ "Hans Exposah" → "Hans Esposa-Lewis" (WRONG - inserted "-Lewis" when not in original)
-❌ "Donna Glapeon" → "Donna Claiborne" (WRONG - changed last name to street name)
-✅ "Cyndi Willard Lewis" → "Cyndi Willard Lewis" (CORRECT - keep as-is if no exact match)
-✅ "Hans Exposah Lewis" → "Hans Esposa Lewis" (CORRECT - only fix the misspelled part)
-
-EXAMPLES OF CORRECT CORRECTIONS:
-✓ "Morino" → "Moreno" (single-word correction)
-✓ "Helaina" → "Helena" (single-word correction)
-✓ "Wittry" → "Witry" (single-word correction)
-✓ "Cannal Street" → "Canal Street" (each word corrected independently)
-✓ "Tchopitoulous Street" → "Tchoupitoulas Street" (each word corrected independently)
-
-NAME CONTEXT INDICATORS (when to apply corrections):
-✓ After titles: Mayor, Councilmember, Commissioner, Dr., Mr., Mrs., Ms., Senator, Representative, Pastor, Chair, Vice Chair, Chairwoman
-✓ After first names: Elizabeth, Katie, Robert, Jonathan, Kelly, Joseph, Helena, Oliver, Kristin, Lindsay, Hans, Cyndi, Donna
-✓ Before street indicators: Street, Avenue, Boulevard, Road, Lane, Drive, Court, Place, Way
-✓ When capitalized mid-sentence (likely a proper noun)
-
-PROTECTED COMMON WORDS (DO NOT change these):
-- Time words: "the weekend", "this weekend", "last weekend"
-- Quantity: "more information", "more details", "need more"
-- Ordinals: "second motion", "first item", "third vote"
-- Verbs: "has been", "have discussed", "was seconded"
-- Common words: "representing", "resident", "community", "neighborhood", "concerns"
-
-CORRECTION STRATEGY:
-1. Is the word in a name context?
-2. Is it similar to a glossary term (even 1-2 letters different)?
-3. Does the glossary term have the SAME NUMBER OF WORDS as the original?
-4. If YES to all → Change to EXACT glossary spelling
-5. If NO to any → Leave unchanged
-6. When in doubt → Leave unchanged (better to miss an error than create a false positive)
-
-TRANSCRIPT TO CORRECT:
-{text}
-
-CORRECTED TRANSCRIPT (output ONLY the corrected text, no explanations):"""
-
-    prompt = ChatPromptTemplate.from_template(template)
-    chain = prompt | llm | StrOutputParser()
-    
+    # 3. New Orleans streets (array format)
     try:
-        corrected_text = chain.invoke({
-            "glossary": glossary_str,
-            "text": text
-        })
-        
-        # Count approximate changes
-        original_words = text.split()
-        corrected_words = corrected_text.split()
-        changes = sum(1 for o, c in zip(original_words, corrected_words) if o.lower() != c.lower())
-        
-        # NEW: Sanity check for word count
-        original_word_count = len(original_words)
-        corrected_word_count = len(corrected_words)
-        
-        if corrected_word_count > original_word_count + 5:
-            print(f"   ⚠️ WARNING: LLM added {corrected_word_count - original_word_count} words!")
-            print(f"   Original: {original_word_count} words, Corrected: {corrected_word_count} words")
-        
-        print(f"   ✅ LLM made approximately {changes} corrections")
-        
-        return corrected_text
-    except Exception as e:
-        print(f"   ⚠️ LLM correction failed: {e}")
-        print("   Falling back to original text")
-        return text
+        with open('nola_streets.json', 'r', encoding='utf-8') as f:
+            streets = json.load(f)
+        print(f"✅ Loaded {len(streets)} street names")
+    except FileNotFoundError:
+        print("⚠️ nola_streets.json not found - using sample set")
+        streets = ["Claiborne Avenue", "Canal Street", "Tchoupitoulas Street"]
+    
+    return {
+        'english': english_words,
+        'streets': streets,
+        'names': names,
+        'first_names': set(fn.lower() for fn in first_names),
+        'last_names': set(ln.lower() for ln in last_names)
+    }
 
 
-def llm_correct_in_chunks(text, custom_glossary, llm, chunk_size=3000):
-    """Process long transcripts with improved LLM correction and word insertion prevention"""
-    print("   📄 Processing long transcript in chunks...")
+# ============================================================================
+# LLM CORRECTION WITH CHANGE TRACKING
+# ============================================================================
+
+def find_potential_name_errors(text: str, dicts: Dict) -> Tuple[List[str], List[str]]:
+    """
+    Find words that look like misspelled names by fuzzy matching
+    
+    Returns: (high_confidence_errors, low_confidence_errors)
+    """
+    from difflib import get_close_matches, SequenceMatcher
     
     words = text.split()
-    chunks = []
+    high_confidence = []
+    low_confidence = []
     
-    for i in range(0, len(words), chunk_size):
-        chunk = ' '.join(words[i:i+chunk_size+200])
-        chunks.append(chunk)
+    # Look for words after titles that might be names
+    title_words = ['mayor', 'councilmember', 'commissioner', 'dr.', 'mr.', 'ms.']
     
-    glossary_str = ", ".join(custom_glossary[:150])
-    
-    # SAME IMPROVED TEMPLATE for chunks
-    template = """You are a transcription correction assistant.
-
-GLOSSARY (ONLY VALID SPELLINGS - DO NOT DEVIATE):
-{glossary}
-
-🚨 CRITICAL RULES:
-1. Use EXACT glossary spellings
-2. **NEVER INSERT WORDS THAT AREN'T IN THE ORIGINAL TEXT**
-3. **If a glossary entry has multiple words, only use it if ALL words appear in the original**
-4. **WORD-FOR-WORD REPLACEMENT ONLY**
-
-EXAMPLES OF WHAT NOT TO DO:
-❌ "Willard" → "Wildair Drive" (WRONG - inserted "Drive")
-❌ "Exposah" → "Esposa-Lewis" (WRONG - inserted "-Lewis")
-✅ "Willard" → "Willard" (CORRECT - keep as-is if no exact match)
-
-REQUIRED CORRECTIONS:
-- "Morino" → "Moreno" (vowel swap)
-- "Witrey" → "Witry" (remove extra letter)
-- "Helaina" → "Helena" (vowel correction)
-- "Cannal" → "Canal" (remove double letter)
-
-PROTECTED PHRASES:
-- "the weekend", "more information", "second motion", "representing", "community"
-
-TRANSCRIPT CHUNK:
-{text}
-
-CORRECTED CHUNK (output ONLY the corrected text):"""
-    
-    prompt = ChatPromptTemplate.from_template(template)
-    chain = prompt | llm | StrOutputParser()
-    
-    corrected_chunks = []
-    for idx, chunk in enumerate(chunks):
-        print(f"   Processing chunk {idx+1}/{len(chunks)}...")
-        try:
-            corrected = chain.invoke({
-                "glossary": glossary_str,
-                "text": chunk
-            })
-            corrected_chunks.append(corrected)
-        except Exception as e:
-            print(f"   ⚠️ Chunk {idx+1} failed, using original")
-            corrected_chunks.append(chunk)
-    
-    return ' '.join(corrected_chunks)
-
-
-def get_all_matches_above_threshold(word, glossary, threshold=0.85):
-    """Get ALL matches above threshold with case-insensitive comparison"""
-    word_clean = word.strip('.,!?;:\'"()[]{}')
-    word_lower = word_clean.lower()
-    
-    matches_by_lower = {}
-    
-    for term in glossary:
-        term_lower = term.lower()
-        score = similarity_score(word_lower, term_lower)
-        
-        if score >= threshold:
-            if term_lower not in matches_by_lower:
-                matches_by_lower[term_lower] = []
-            matches_by_lower[term_lower].append({
-                'term': term,
-                'score': score
-            })
-    
-    final_matches = []
-    for term_lower, term_matches in matches_by_lower.items():
-        best_match = None
-        
-        for match in term_matches:
-            term = match['term']
-            if len(term) > 0 and term[0].isupper() and not term.isupper():
-                best_match = match
-                break
-        
-        if not best_match:
-            best_match = term_matches[0]
-        
-        final_matches.append(best_match)
-    
-    final_matches.sort(key=lambda x: x['score'], reverse=True)
-    return final_matches
-
-
-def is_likely_first_name(word, custom_glossary):
-    """Check if a word is likely a first name"""
-    word_clean = word.strip('.,!?;:\'"()[]{}')
-    word_lower = word_clean.lower()
-    
-    common_first_names = {
-        'elizabeth', 'katie', 'robert', 'jonathan', 'kelly', 'kathleen',
-        'nomita', 'dasjon', 'lorey', 'eugene', 'joseph', 'helena',
-        'jp', 'lesli', 'oliver', 'freddie', 'kristin', 'jean-paul',
-        'shawn', 'lindsay', 'donna', 'arnaud', 'pastor', 'mariano',
-        'hans', 'cyndi', 'latoya', 'jared', 'jay', 'laura'
-    }
-    
-    if word_lower in common_first_names:
-        return True
-    
-    for term in custom_glossary:
-        parts = term.split()
-        if len(parts) >= 2 and parts[0].lower() == word_lower:
-            return True
-    
-    return False
-
-
-def fix_multiword_names(text):
-    """Fix known multi-word name errors before word-by-word processing"""
-    
-    multiword_fixes = {
-        r'\bexpose\s+a\s+lewis\b': 'Esposa-Lewis',
-        r'\bexpose\s+lewis\b': 'Esposa-Lewis',
-        r'\bhans\s+expose\b': 'Hans Esposa-Lewis',
-        r'\bjoshi\s+gupta\b': 'Joshi-Gupta',
-        r'\bthomas\s+thomason\b': 'Thomas',
-        r'\bjp\s+more\b': 'JP Morrell',
-    }
-    
-    for pattern, replacement in multiword_fixes.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
-    return text
-
-
-def remove_duplicate_names(text, glossary):
-    """Remove duplicate consecutive names"""
-    words = text.split()
-    cleaned = []
+    # Get the original name lists (not the lowercase sets)
+    all_names = dicts['names']
     
     for i, word in enumerate(words):
-        word_clean = word.strip('.,!?;:\'"()[]{}')
-        
-        if i > 0 and len(cleaned) > 0:
-            prev_word = cleaned[-1].strip('.,!?;:\'"()[]{}')
-            if word_clean.lower() == prev_word.lower():
-                continue
-        
-        cleaned.append(word)
-    
-    return ' '.join(cleaned)
-
-
-def get_adaptive_threshold(word, prev_was_first_name, position, words):
-    """Dynamically adjust threshold based on context"""
-    if prev_was_first_name:
-        return 0.60
-    
-    if position > 0:
-        prev_word = words[position - 1].lower().strip('.,!?;:\'"()[]{}')
-        title_indicators = ['councilmember', 'commissioner', 'mayor', 'pastor', 'dr', 'mr', 'mrs', 'ms']
-        if prev_word in title_indicators:
-            return 0.75
-    
-    if position < len(words) - 1:
-        next_word = words[position + 1].lower().strip('.,!?;:\'"()[]{}')
-        street_indicators = ['street', 'st', 'avenue', 'ave', 'boulevard', 'blvd', 'road', 'rd', 'lane', 'ln']
-        if next_word in street_indicators:
-            return 0.70
-    
-    return 0.85
-
-
-def get_length_adjusted_threshold(word, base_context_threshold):
-    """Dynamically adjust threshold based on word length"""
-    word_clean = word.strip('.,!?;:\'"()[]{}')
-    word_len = len(word_clean)
-    
-    if word_len <= 3:
-        return min(base_context_threshold + 0.15, 0.98)
-    elif word_len == 4:
-        return min(base_context_threshold + 0.10, 0.95)
-    elif word_len == 5:
-        return min(base_context_threshold + 0.05, 0.90)
-    elif word_len <= 7:
-        return base_context_threshold
-    elif word_len <= 10:
-        return max(base_context_threshold - 0.05, 0.70)
-    else:
-        return max(base_context_threshold - 0.10, 0.65)
-
-
-def needs_name_check(word, position, words, english_dict):
-    """Determine if a word should be checked against custom glossary based on context"""
-    word_clean = word.strip('.,!?;:\'"()[]{}')
-    word_lower = word_clean.lower()
-    
-    # EXPANDED protected words list
-    protected_words = {
-        'mayor', 'councilmember', 'councilwoman', 'councilman', 'board',
-        'commissioner', 'senator', 'representative', 'president',
-        'vice', 'chair', 'chairman', 'chairwoman', 'pastor',
-        'mr', 'mrs', 'ms', 'dr', 'prof', 'professor',
-        'council', 'member', 'city', 'street', 'avenue', 'road',
-        'boulevard', 'drive', 'lane', 'place', 'court', 'way',
-        'january', 'february', 'march', 'april', 'may', 'june',
-        'july', 'august', 'september', 'october', 'november', 'december',
-        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-        'the', 'this', 'that', 'these', 'those', 'agenda', 'item', 'meeting',
-        'budget', 'project', 'development', 'infrastructure', 'community',
-        'seconded', 'second', 'first', 'third', 'fourth',
-        'has', 'have', 'had', 'was', 'were', 'been', 'on', 'behalf',
-        'for', 'from', 'with', 'about', 'after', 'before',
-        'lanes', 'lane', 'patterns', 'pattern', 'traffic', 'impacts',
-        'and', 'or', 'but', 'nor', 'yet', 'so',
-        'residents', 'resident', 'testimony', 'provided',
-        'concerns', 'addressed', 'improvements', 'discussed',
-        'mentioned', 'representatives', 'permits', 'presented',
-        'commissioners', 'representatives',
-        # NEW additions
-        'representing', 'neighborhood', 'business', 'owner', 'advocate',
-        'organizer', 'association', 'former', 'current', 'interim',
-        'acting', 'deputy', 'assistant', 'issues', 'questions',
-        'comments', 'approved', 'denied', 'tabled', 'deferred',
-        'amended', 'vote', 'funding', 'public', 'private',
-        'state', 'federal', 'local'
-    }
-    
-    if word_lower in protected_words:
-        return False
-    
-    if word_lower not in english_dict:
-        return True
-    
-    if position > 0:
-        prev_word = words[position - 1].lower().strip('.,!?;:\'"()[]{}')
-        name_indicators = [
-            'councilmember', 'councilwoman', 'councilman',
-            'commissioner', 'senator', 'representative',
-            'mr', 'mrs', 'ms', 'dr', 'chair', 'chairman', 'chairwoman', 'pastor'
-        ]
-        if prev_word in name_indicators:
-            return True
-    
-    if position < len(words) - 1:
-        next_word = words[position + 1].lower().strip('.,!?;:\'"()[]{}')
-        street_indicators = [
-            'street', 'st', 'avenue', 'ave', 'road', 'rd',
-            'boulevard', 'blvd', 'drive', 'dr', 'lane', 'ln',
-            'place', 'pl', 'court', 'ct', 'way', 'parkway', 'pkwy'
-        ]
-        if next_word in street_indicators:
-            return True
-    
-    if position > 0 and len(word) > 0 and word[0].isupper():
-        prev_word = words[position - 1]
-        if not prev_word.endswith('.') and not prev_word.endswith('!') and not prev_word.endswith('?'):
-            return True
-    
-    return False
-
-
-def correct_word_with_confidence(word, position, words, english_dict, custom_glossary, 
-                                 prev_was_first_name, base_threshold=0.75, ambiguity_threshold=0.05):
-    """
-    STAGE 1: Fuzzy matching with adaptive thresholds (deterministic)
-    """
-    
-    word_clean = word.strip('.,!?;:\'"()[]{}')
-    word_lower = word_clean.lower()
-    
-    prefix_punct = ''
-    suffix_punct = ''
-    temp_word = word
-    while temp_word and temp_word[0] in '.,!?;:\'"()[]{}':
-        prefix_punct += temp_word[0]
-        temp_word = temp_word[1:]
-    temp_word = word
-    while temp_word and temp_word[-1] in '.,!?;:\'"()[]{}':
-        suffix_punct = temp_word[-1] + suffix_punct
-        temp_word = temp_word[:-1]
-    
-    protected_words = {
-        'mayor', 'councilmember', 'councilwoman', 'councilman',
-        'commissioner', 'senator', 'representative', 'president',
-        'the', 'this', 'that', 'these', 'those', 'and', 'or', 'but',
-        'has', 'have', 'had', 'was', 'were', 'been',
-        'seconded', 'second', 'first', 'third', 'fourth',
-        'for', 'from', 'with', 'about', 'after', 'before'
-    }
-    
-    if word_lower in protected_words:
-        return word, False, "protected_word", False, 0.0
-    
-    adaptive_threshold = get_adaptive_threshold(word, prev_was_first_name, position, words)
-    final_threshold = get_length_adjusted_threshold(word_clean, adaptive_threshold)
-    
-    current_is_first_name = is_likely_first_name(word, custom_glossary)
-    should_check_custom = needs_name_check(word, position, words, english_dict)
-    
-    if should_check_custom or prev_was_first_name:
-        custom_lower_map = {}
-        for term in custom_glossary:
-            term_lower = term.lower()
-            if term_lower not in custom_lower_map:
-                custom_lower_map[term_lower] = term
-            elif len(term) > 0 and term[0].isupper() and not term.isupper():
-                custom_lower_map[term_lower] = term
-        
-        if word_lower in custom_lower_map:
-            corrected = prefix_punct + custom_lower_map[word_lower] + suffix_punct
-            if corrected != word:
-                return corrected, True, "exact_match", current_is_first_name, 1.0
-        
-        matches = get_all_matches_above_threshold(word_clean, custom_glossary, final_threshold)
-        
-        if matches:
-            best_match = matches[0]
-            confidence = best_match['score']
+        if word.lower() in title_words and i + 1 < len(words):
+            potential_name = words[i + 1].strip('.,!?;:\'"()[]{}')
             
-            if word_lower in english_dict and confidence < 0.95:
-                return word, False, f"english_word_low_confidence (len={len(word_clean)}, thresh={final_threshold:.2f})", current_is_first_name, confidence
-            
-            if len(matches) > 1:
-                second_best = matches[1]
-                score_diff = confidence - second_best['score']
+            # Check if this name is NOT exactly in our reference (case-insensitive)
+            if potential_name.lower() not in [n.lower() for n in all_names]:
+                # Use fuzzy matching to find close matches
+                close_matches = get_close_matches(
+                    potential_name, 
+                    all_names,
+                    n=1, 
+                    cutoff=0.70  # Lower threshold to catch more
+                )
                 
-                if score_diff < ambiguity_threshold:
-                    return word, False, f"ambiguous ({len(matches)} matches, len={len(word_clean)})", current_is_first_name, confidence
-            
-            return prefix_punct + best_match['term'] + suffix_punct, True, f"fuzzy_match (conf={confidence:.2f}, len={len(word_clean)}, thresh={final_threshold:.2f})", current_is_first_name, confidence
+                if close_matches:
+                    match = close_matches[0]
+                    # Calculate similarity ratio
+                    similarity = SequenceMatcher(None, potential_name.lower(), match.lower()).ratio()
+                    
+                    error_str = f"{potential_name} → {match}"
+                    
+                    # High confidence: >78% similar (1-2 letter difference)
+                    if similarity > 0.78:
+                        high_confidence.append(error_str)
+                    else:
+                        low_confidence.append(error_str)
     
-    return word, False, "no_correction_needed", current_is_first_name, 0.0
+    return high_confidence, low_confidence
 
 
-def correct_response_text(text, english_dict, custom_glossary, base_threshold=0.75, ambiguity_threshold=0.05):
+def llm_correct_with_tracking(text: str, dicts: Dict, llm) -> Tuple[str, List[Dict]]:
     """
-    STAGE 1: Fuzzy matching correction (deterministic)
+    Single-stage LLM correction with comprehensive change tracking
+    
+    Args:
+        text: Original text to correct
+        dicts: Dictionary containing names, streets, english words
+        llm: LLM instance
+    
+    Returns:
+        (corrected_text, list_of_changes)
     """
     
-    print("\n🔧 STAGE 1: Fuzzy Matching (Deterministic)")
-    
-    text = fix_multiword_names(text)
-    
-    words = text.split()
-    corrected_words = []
-    corrections = []
-    ambiguous_cases = []
-    
-    prev_was_first_name = False
-    
-    for i, word in enumerate(words):
-        corrected_word, was_corrected, match_info, is_first_name, confidence = correct_word_with_confidence(
-            word, i, words, english_dict, custom_glossary, 
-            prev_was_first_name, base_threshold, ambiguity_threshold
-        )
-        
-        corrected_words.append(corrected_word)
-        
-        if was_corrected:
-            corrections.append({
-                'position': i,
-                'original': word,
-                'corrected': corrected_word,
-                'match_info': match_info,
-                'confidence': confidence
-            })
-        elif 'ambiguous' in match_info:
-            ambiguous_cases.append({
-                'position': i,
-                'word': word,
-                'match_info': match_info
-            })
-        
-        prev_was_first_name = is_first_name
-    
-    corrected_text = ' '.join(corrected_words)
-    corrected_text = remove_duplicate_names(corrected_text, custom_glossary)
-    
-    print(f"   ✅ Applied {len(corrections)} fuzzy-match corrections")
-    if ambiguous_cases:
-        print(f"   ⚠️ Found {len(ambiguous_cases)} ambiguous cases (kept original)")
-    
-    return corrected_text, corrections
-
-
-def print_correction_report(original_text, corrected_text, all_corrections):
-    """Print comprehensive correction report from all three stages"""
-    print("\n" + "="*80)
-    print("🔧 THREE-STAGE CORRECTION REPORT")
+    print("\n🤖 LLM CORRECTION PIPELINE")
     print("="*80)
     
-    if not all_corrections or sum(len(stage) for stage in all_corrections.values()) == 0:
-        print("✅ No corrections needed - all words recognized!")
-    else:
-        total_corrections = sum(len(stage) for stage in all_corrections.values())
-        print(f"📝 Made {total_corrections} total correction(s) across 3 stages:\n")
-        
-        for stage_name, corrections in all_corrections.items():
-            if corrections:
-                print(f"\n{stage_name}:")
-                for idx, corr in enumerate(corrections[:5], 1):  # Show first 5 per stage
-                    conf_str = f" (confidence: {corr['confidence']:.2f})" if 'confidence' in corr else ""
-                    reason = corr.get('reason', corr.get('match_info', 'N/A'))
-                    print(f"  {idx}. '{corr['original']}' → '{corr['corrected']}' [{reason}]{conf_str}")
-                if len(corrections) > 5:
-                    print(f"  ... and {len(corrections) - 5} more corrections")
-        
-        print("\n" + "-"*80)
-        print("ORIGINAL RESPONSE:")
-        print("-"*80)
-        print(original_text[:500] + "..." if len(original_text) > 500 else original_text)
-        print()
-        
-        print("-"*80)
-        print("FINAL CORRECTED RESPONSE:")
-        print("-"*80)
-        print(corrected_text[:500] + "..." if len(corrected_text) > 500 else corrected_text)
-        print()
+    # SAFETY CHECK: Don't process extremely large texts
+    word_count = len(text.split())
+    if word_count > 3000:
+        print(f"   ⚠️ ERROR: Text too large ({word_count} words)")
+        print(f"   Maximum supported: 3000 words")
+        print(f"   Suggestion: The document is too large to correct in one pass")
+        print(f"   Using first 3000 words only...")
+        # Truncate to first 3000 words
+        words = text.split()[:3000]
+        text = ' '.join(words)
+        word_count = 3000
     
-    print("="*80 + "\n")
+    # Sample glossary terms to include in prompt
+    names_sample = ", ".join(dicts['names'])  # Send ALL names
+    streets_sample = ", ".join(dicts['streets'])
+    
+    # Find potential name errors using fuzzy matching
+    high_conf_errors, low_conf_errors = find_potential_name_errors(text, dicts)
+    
+    # Build hint section based on confidence
+    hints_section = ""
+    
+    if high_conf_errors:
+        hints_section += f"""
+🚨 DEFINITE TRANSCRIPTION ERRORS (MUST FIX):
+{chr(10).join(f"- {error}" for error in high_conf_errors)}
 
+These are clear misspellings. Replace the left side with the right side.
+"""
+    
+    if low_conf_errors:
+        hints_section += f"""
+POSSIBLE TRANSCRIPTION ERRORS (CHECK CAREFULLY):
+{chr(10).join(f"- {error}" for error in low_conf_errors[:10])}
+
+These might be errors - verify against context before correcting.
+"""
+    
+    # Build comprehensive prompt
+    prompt = f"""You are correcting transcription errors in New Orleans City Council meeting transcripts. Audio-to-text systems often mishear names and street names.
+
+REFERENCE - PEOPLE NAMES IN NEW ORLEANS:
+{names_sample}
+
+REFERENCE - STREET NAMES IN NEW ORLEANS:
+{streets_sample}
+{hints_section}
+INSTRUCTIONS:
+1. FIRST: Fix all "DEFINITE TRANSCRIPTION ERRORS" listed above - these are confirmed mistakes
+2. Look for names after titles like "Mayor", "Councilmember", "Commissioner" 
+3. Check "POSSIBLE TRANSCRIPTION ERRORS" and fix if they make sense in context
+4. Only correct names when you're confident it's an error
+5. Do NOT change legitimate names that aren't in the reference list
+6. Do NOT change common English words
+7. Do NOT rewrite sentences
+8. Keep everything else EXACTLY as it appears
+9. This is an English transcript. Do NOT assume foreign spellings are correct
+10. Check reference list for proper double consonant usage
+11. New Orleans has French street names - check reference list for correct spelling
+CRITICAL: Output ONLY the corrected text. DO NOT add any explanations, notes, or comments. Just the corrected text.
+
+TEXT TO CORRECT:
+{text}
+
+CORRECTED TEXT:"""
+
+    word_count = len(text.split())
+    print(f"   📝 Sending {word_count} words to LLM...")
+    
+    # Warn if too large
+    if word_count > 1000:
+        print(f"   ⚠️ WARNING: Context is large ({word_count} words). This may take 2-5 minutes.")
+    
+    # DEBUG: Print first 200 chars of what LLM receives
+   
+    
+    try:
+        import time
+        start_time = time.time()
+        response = llm.invoke(prompt)
+        
+        # Extract text content from AIMessage object
+        if hasattr(response, 'content'):
+            corrected_text = response.content.strip()
+        else:
+            corrected_text = str(response).strip()
+        
+        elapsed = time.time() - start_time
+        print(f"   ✅ LLM responded in {elapsed:.1f} seconds")
+        
+        # Remove any markdown formatting the LLM might add
+        corrected_text = corrected_text.replace("```", "").strip()
+        if corrected_text.startswith("CORRECTED TEXT:"):
+            corrected_text = corrected_text.replace("CORRECTED TEXT:", "").strip()
+        
+        # Remove common LLM explanation patterns at the end
+        explanation_patterns = [
+            "this is the corrected text",
+            "these names have been corrected",
+            "note:",
+            "corrections made:",
+            "i have corrected",
+            "the following corrections",
+            "summary of corrections",
+            "potential transcription errors",
+            "addressed:",
+        ]
+        
+        # Find the earliest occurrence of any explanation pattern
+        earliest_idx = len(corrected_text)
+        for pattern in explanation_patterns:
+            idx = corrected_text.lower().find(pattern.lower())
+            if idx != -1 and idx < earliest_idx:
+                earliest_idx = idx
+        
+        # If we found an explanation, truncate there
+        if earliest_idx < len(corrected_text):
+            # Look backwards to find the last sentence-ending punctuation
+            last_period = corrected_text.rfind('.', 0, earliest_idx)
+            last_question = corrected_text.rfind('?', 0, earliest_idx)
+            last_exclaim = corrected_text.rfind('!', 0, earliest_idx)
+            
+            last_punct = max(last_period, last_question, last_exclaim)
+            
+            if last_punct > 0:
+                corrected_text = corrected_text[:last_punct + 1].strip()
+                print(f"   🔧 Stripped LLM explanation from output")
+        
+        # Track changes by comparing original and corrected with PROPER DIFF
+        changes = compare_texts_with_diff(text, corrected_text)
+        
+        # If NO changes were made, the LLM might be too conservative - warn user
+        if len(changes) == 0:
+            print(f"   ⚠️ WARNING: LLM made 0 corrections!")
+            print(f"   This might mean:")
+            print(f"   1. The text was already perfect")
+            print(f"   2. The LLM is being too conservative")
+            print(f"   3. The LLM didn't understand the prompt")
+            print(f"   ")
+            print(f"   💡 Suggestion: Review the input text to verify if errors exist")
+
+        
+        print(f"   ✅ LLM made {len(changes)} corrections")
+        
+        return corrected_text, changes
+        
+    except Exception as e:
+        print(f"   ❌ LLM correction failed: {e}")
+        print("   Returning original text unchanged")
+        return text, []
+
+
+def compare_texts_with_diff(original: str, corrected: str) -> List[Dict]:
+    """
+    Compare two texts using proper diff algorithm to identify actual changes
+    
+    This fixes the bug where position-based comparison would get out of sync
+    and report false positives.
+    
+    Args:
+        original: Original text
+        corrected: Corrected text
+    
+    Returns:
+        List of dicts with: {original, corrected, context}
+    """
+    
+    original_words = original.split()
+    corrected_words = corrected.split()
+    
+    # Use SequenceMatcher to find actual differences
+    matcher = SequenceMatcher(None, original_words, corrected_words)
+    changes = []
+    
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'replace':
+            # Word(s) were changed
+            orig_text = ' '.join(original_words[i1:i2])
+            corr_text = ' '.join(corrected_words[j1:j2])
+            
+            # Filter out punctuation-only changes
+            orig_clean = orig_text.strip('.,!?;:\'"()[]{}').lower()
+            corr_clean = corr_text.strip('.,!?;:\'"()[]{}').lower()
+            
+            # Skip if only punctuation changed
+            if orig_clean == corr_clean:
+                continue
+            
+            # Skip if words are too different (likely a rewrite, not a correction)
+            # Exception: allow complete changes if they're short (1-2 words)
+            word_count = len(orig_clean.split())
+            if word_count > 2:
+                similarity = SequenceMatcher(None, orig_clean, corr_clean).ratio()
+                if similarity < 0.3:
+                    continue
+            
+            # Get context (5 words before and after)
+            context_start = max(0, j1 - 5)
+            context_end = min(len(corrected_words), j2 + 5)
+            context = ' '.join(corrected_words[context_start:context_end])
+            
+            changes.append({
+                'original': orig_text,
+                'corrected': corr_text,
+                'context': context,
+                'position': i1  # Keep for sorting/reference
+            })
+        
+        elif tag == 'delete':
+            # Word(s) were removed
+            orig_text = ' '.join(original_words[i1:i2])
+            
+            # Get context
+            context_start = max(0, j1 - 5)
+            context_end = min(len(corrected_words), j1 + 5)
+            context = ' '.join(corrected_words[context_start:context_end])
+            
+            changes.append({
+                'original': orig_text,
+                'corrected': '[DELETED]',
+                'context': context,
+                'position': i1
+            })
+        
+        elif tag == 'insert':
+            # Word(s) were added
+            corr_text = ' '.join(corrected_words[j1:j2])
+            
+            # Get context
+            context_start = max(0, j1 - 5)
+            context_end = min(len(corrected_words), j2 + 5)
+            context = ' '.join(corrected_words[context_start:context_end])
+            
+            changes.append({
+                'original': '[INSERTED]',
+                'corrected': corr_text,
+                'context': context,
+                'position': i1
+            })
+    
+    return changes
+
+
+# ============================================================================
+# CHANGE REPORTING
+# ============================================================================
+
+def generate_correction_report(original_text: str, corrected_text: str, 
+                               changes: List[Dict]) -> str:
+    """Generate detailed correction report"""
+    
+    report = []
+    report.append("=" * 80)
+    report.append("📊 LLM CORRECTION REPORT")
+    report.append("=" * 80)
+    report.append("")
+    
+    # Summary Statistics
+    report.append("📈 SUMMARY STATISTICS")
+    report.append("-" * 80)
+    report.append(f"Original text length:    {len(original_text)} characters")
+    report.append(f"Corrected text length:   {len(corrected_text)} characters")
+    report.append(f"Total words processed:   {len(original_text.split())} words")
+    report.append(f"")
+    report.append(f"TOTAL CHANGES MADE:      {len(changes)}")
+    report.append("")
+    
+    # Detailed Changes
+    if changes:
+        report.append("🔧 DETAILED CORRECTIONS")
+        report.append("-" * 80)
+        
+        for i, change in enumerate(changes, 1):
+            report.append(f"\n{i}. Change at position {change['position']}:")
+            report.append(f"   Original:  '{change['original']}'")
+            report.append(f"   Corrected: '{change['corrected']}'")
+            report.append(f"   Context:   ...{change['context']}...")
+        
+        report.append("")
+    else:
+        report.append("✅ NO CORRECTIONS NEEDED")
+        report.append("-" * 80)
+        report.append("The text was already correctly transcribed!")
+        report.append("")
+    
+    # Text comparison
+    report.append("📝 TEXT COMPARISON")
+    report.append("-" * 80)
+    report.append("\nORIGINAL (first 500 chars):")
+    report.append(original_text[:500] + ("..." if len(original_text) > 500 else ""))
+    report.append("\nCORRECTED (first 500 chars):")
+    report.append(corrected_text[:500] + ("..." if len(corrected_text) > 500 else ""))
+    report.append("")
+    
+    report.append("=" * 80)
+    
+    return "\n".join(report)
+
+
+# ============================================================================
+# METADATA EXTRACTION
+# ============================================================================
 
 def extract_meeting_metadata(text):
     """Extract key metadata from meeting transcripts"""
@@ -1040,55 +515,75 @@ def load_text_file(file_path):
 
 
 def load_json_transcript(file_path):
-    """Load JSON transcript"""
+    """Load JSON transcript and extract only the text content"""
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
+    text_parts = []
+    
     try:
+        # Try parsing as a complete JSON array first
         data = json.loads(content)
-        if isinstance(data, dict) and 'segments' in data:
-            text_parts = []
-            for segment in data.get('segments', []):
-                timestamp = segment.get('start', 'N/A')
-                text = segment.get('text', '').strip()
-                speaker = segment.get('speaker', 'Unknown')
-                
-                text_parts.append(f"[Time: {timestamp}s | Speaker: {speaker}]\n{text}")
-            
-            text = "\n\n".join(text_parts)
+        
+        if isinstance(data, list):
+            # It's an array of segments
+            for segment in data:
+                if 'text' in segment:
+                    text_parts.append(segment['text'].strip())
         else:
-            text = json.dumps(data, indent=2)
+            # It's a single object, try to find text
+            if 'text' in data:
+                text_parts.append(data['text'].strip())
+    
     except json.JSONDecodeError:
-        text = content
+        # Fall back to line-by-line parsing (newline-delimited JSON)
+        lines = content.split('\n')
+        for line in lines:
+            try:
+                data = json.loads(line.strip())
+                if 'text' in data:
+                    text_parts.append(data['text'].strip())
+            except json.JSONDecodeError:
+                continue
     
-    return [Document(page_content=text, metadata={"source": file_path, "type": "json_transcript"})]
+    # Join all text segments with spaces
+    full_text = ' '.join(text_parts)
+    
+    print(f"   📄 Extracted {len(text_parts)} segments")
+    print(f"   📊 Total text: {len(full_text.split())} words")
+    print(f"   🔍 First 100 chars: {full_text[:100]}...")
+    
+    return [Document(
+        page_content=full_text,
+        metadata={"source": file_path, "type": "json_transcript"}
+    )]
 
 
-def process_documents(files, question, processing_mode='post-process'):
-    """
-    Process uploaded documents with ENHANCED FOUR-STAGE HYBRID CORRECTION PIPELINE
+# ============================================================================
+# MAIN PROCESSING FUNCTION
+# ============================================================================
+
+# Global variable to store latest report
+latest_report = {"report": "", "original": "", "corrected": ""}
+
+def process_documents(files, question):
+    """Process uploaded documents with LLM-only correction pipeline"""
     
-    Stage 1: Fuzzy matching (deterministic, catches obvious errors)
-    Stage 2: LLM correction (context-aware, handles ambiguous cases)
-    Pre-Stage 3: Title validation (fixes common title/term errors)
-    Stage 3: Glossary validation (authoritative, enforces exact matches with short-word handling)
-    """
+    global latest_report
+    
     print("🔄 Initializing ChatOllama model...")
     
     model_local = ChatOllama(
-        model="mistral",
+        model="llama3.1",
         temperature=0,
         num_ctx=8192,
         top_p=0.9,
     )
     
     print("\n📚 Loading dictionaries...")
-    english_dict = load_english_dictionary()
-    custom_glossary = load_custom_glossary()
-    print(f"   English words: {len(english_dict)}")
-    print(f"   Custom terms: {len(custom_glossary)}")
+    dicts = load_dictionaries()
     
-    # Load documents (no pre-processing - we're doing post-processing only)
+    # Load documents
     all_docs = []
     print(f"\n📁 Processing {len(files)} file(s)...")
     for file in files:
@@ -1108,9 +603,12 @@ def process_documents(files, question, processing_mode='post-process'):
             print(f"⚠️ Skipping unsupported file type: {file_path}")
     
     if not all_docs:
-        return "No valid documents uploaded. Please upload JSON, PDF, or TXT files."
+        return "No valid documents uploaded. Please upload JSON, PDF, or TXT files.", "", "", ""
     
     full_text = "\n\n=== DOCUMENT SEPARATOR ===\n\n".join([doc.page_content for doc in all_docs])
+    
+    print(f"   📊 Full document: {len(full_text.split())} words")
+    print(f"   🔍 First 200 chars: {full_text[:200]}...")
     
     print("✂️ Splitting into chunks...")
     text_splitter = RecursiveCharacterTextSplitter(
@@ -1132,6 +630,7 @@ def process_documents(files, question, processing_mode='post-process'):
         embedding=embeddings,
     )
     
+    # Check if comprehensive search needed
     keyword_indicators = [
         'find all', 'list all', 'every instance', 'all occurrences', 
         'how many times', 'count', 'all mentions'
@@ -1140,7 +639,12 @@ def process_documents(files, question, processing_mode='post-process'):
     is_comprehensive = any(indicator in question.lower() for indicator in keyword_indicators)
     
     if is_comprehensive:
-        print("🔍 Using comprehensive search...")
+        print("🔍 Using comprehensive search (full document)...")
+        # Use full text but with size limit
+        word_count = len(full_text.split())
+        if word_count > 2000:
+            print(f"   ⚠️ Document is large ({word_count} words)")
+            print(f"   ⚠️ This may take 3-5 minutes to correct")
         context = full_text
     else:
         print("🔍 Using semantic retrieval...")
@@ -1152,6 +656,15 @@ def process_documents(files, question, processing_mode='post-process'):
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
     
     print("✅ Generating answer...")
+    
+    # CRITICAL FIX: Correct the CONTEXT before generating the answer
+    print("\n" + "="*80)
+    print("🔄 CORRECTING RETRIEVED CONTEXT (Before Answer Generation)")
+    print("="*80)
+    
+    corrected_context, context_changes = llm_correct_with_tracking(context, dicts, model_local)
+    
+    print("\n✅ Now generating answer from corrected context...")
     
     template = """You are an expert document analyst. Answer based on the provided context.
 
@@ -1170,111 +683,136 @@ ANSWER:"""
     prompt = ChatPromptTemplate.from_template(template)
     chain = prompt | model_local | StrOutputParser()
     
-    original_answer = chain.invoke({"context": context, "question": question})
+    # Use CORRECTED context to generate answer
+    final_answer = chain.invoke({"context": corrected_context, "question": question})
     
-    # ENHANCED FOUR-STAGE POST-PROCESSING PIPELINE
-    print("\n" + "="*80)
-    print("🔄 APPLYING ENHANCED FOUR-STAGE CORRECTION PIPELINE")
-    print("="*80)
+    # Generate report showing corrections made to the CONTEXT
+    report = generate_correction_report(context, corrected_context, context_changes)
     
-    all_corrections = {}
+    # Store in global variable
+    latest_report["report"] = report
+    latest_report["original"] = context  # Show original context
+    latest_report["corrected"] = final_answer  # Show final answer
     
-    # STAGE 1: Fuzzy matching (deterministic)
-    corrected_pass1, corrections_stage1 = correct_response_text(
-        original_answer, 
-        english_dict, 
-        custom_glossary,
-        base_threshold=0.75,
-        ambiguity_threshold=0.05
-    )
-    all_corrections['Stage 1 (Fuzzy Matching)'] = corrections_stage1
+    # Print to terminal
+    print("\n" + report)
     
-    # STAGE 2: LLM context-aware correction
-    corrected_pass2 = llm_correct_transcript(corrected_pass1, custom_glossary)
+    # Return for display
+    summary = f"\n\n{'='*80}\n📊 {len(context_changes)} corrections made to source context.\n{'='*80}"
     
-    # Track Stage 2 changes
-    words_pass1 = corrected_pass1.split()
-    words_pass2 = corrected_pass2.split()
-    corrections_stage2 = []
-    for i, (w1, w2) in enumerate(zip(words_pass1, words_pass2)):
-        if w1.lower() != w2.lower():
-            corrections_stage2.append({
-                'position': i,
-                'original': w1,
-                'corrected': w2,
-                'reason': 'llm_context_correction'
-            })
-    all_corrections['Stage 2 (LLM Context)'] = corrections_stage2
+    return final_answer + summary, report, context, final_answer
+
+
+def get_latest_report():
+    """Retrieve the latest correction report"""
+    if not latest_report["report"]:
+        return "No corrections have been run yet. Process a document first.", "", ""
+    return latest_report["report"], latest_report["original"], latest_report["corrected"]
+
+
+# ============================================================================
+# GRADIO INTERFACE WITH TABS
+# ============================================================================
+
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 📄 Meeting Transcript Analyzer with LLM Correction")
     
-    # PRE-STAGE 3: Title and common term validation
-    corrected_pass2_5, corrections_titles = validate_titles_and_common_terms(corrected_pass2)
-    all_corrections['Pre-Stage 3 (Title Validation)'] = corrections_titles
-    
-    # STAGE 3: Enhanced glossary validation (with short-word handling and false positive prevention)
-    final_answer, corrections_stage3 = validate_against_glossary(corrected_pass2_5, custom_glossary)
-    all_corrections['Stage 3 (Glossary Validation)'] = corrections_stage3
-    
-    # Print comprehensive report
-    print_correction_report(original_answer, final_answer, all_corrections)
-    
-    return final_answer
-
-
-# Gradio Interface
-iface = gr.Interface(
-    fn=lambda files, question: process_documents(files, question, 'post-process'),
-    inputs=[
-        gr.File(
-            label="Upload Meeting Transcripts (JSON, PDF, TXT)", 
-            file_count="multiple",
-            file_types=[".json", ".pdf", ".txt"]
-        ),
-        gr.Textbox(
-            label="Ask a question about your documents", 
-            lines=4,
-            placeholder="Examples:\n- When did this meeting start?\n- Find all mentions of 'budget'\n- What was discussed about Crescent Care?"
-        )
-    ],
-    outputs=gr.Textbox(label="Answer", lines=20, show_copy_button=True),
-    title="📄 Meeting Transcript Analyzer with Enhanced Four-Stage Correction",
-    description="""Upload meeting transcripts for intelligent analysis with automatic name correction.
-
-🔄 **FOUR-STAGE CORRECTION PIPELINE:**
-
-**Stage 1: Fuzzy Matching (Deterministic)**
-- Catches obvious misspellings using similarity scores
-- Adaptive thresholds based on context and word length
-- Fast and reliable for clear-cut errors
-
-**Stage 2: LLM Context-Aware Correction**
-- Uses Mistral locally (no cost) for intelligent corrections
-- Understands context (e.g., "weekend" as name vs. time reference)
-- Handles ambiguous cases that fuzzy matching misses
-
-**Pre-Stage 3: Title & Term Validation**
-- Fixes common title errors (Commission → Commissioner)
-- Corrects known problematic patterns
-- Prepares text for final glossary validation
-
-**Stage 3: Glossary Validation (Authoritative)**
-- **NEW: Separates person names from street names**
-- **NEW: Prevents false positives (e.g., "Glapion" → "Claiborne")**
-- **NEW: Context-aware glossary filtering**
-- **NEW: Confidence gating for ambiguous corrections**
-- Enforces exact glossary matches as final authority
-- Ensures 100% glossary compliance
-
-✅ **Benefits:**
-- Combines precision of fuzzy matching + intelligence of LLM + authority of glossary
-- **Eliminates false positives through context-aware filtering**
-- Each stage compensates for weaknesses of the others
-- Transparent correction tracking across all stages
-- Expected accuracy: ~95-98% with near-zero false positives
-
-💡 **Tip:** Check the terminal output to see detailed corrections from each stage!""",
-    theme=gr.themes.Soft()
-)
-
+    with gr.Tabs():
+        # TAB 1: Main Q&A Interface
+        with gr.Tab("📝 Ask Questions"):
+            with gr.Row():
+                with gr.Column():
+                    file_input = gr.File(
+                        label="Upload Meeting Transcripts (JSON, PDF, TXT)",
+                        file_count="multiple",
+                        file_types=[".json", ".pdf", ".txt"]
+                    )
+                    question_input = gr.Textbox(
+                        label="Ask a question about your documents",
+                        lines=4,
+                        placeholder="Examples:\n- When did this meeting start?\n- Find all mentions of 'budget'\n- What was discussed about Crescent Care?"
+                    )
+                    submit_btn = gr.Button("Submit", variant="primary")
+                
+                with gr.Column():
+                    answer_output = gr.Textbox(
+                        label="Answer (Corrected)",
+                        lines=20,
+                        show_copy_button=True
+                    )
+            
+            # Hidden outputs for report tab
+            report_store = gr.Textbox(visible=False)
+            original_store = gr.Textbox(visible=False)
+            corrected_store = gr.Textbox(visible=False)
+            
+            submit_btn.click(
+                fn=process_documents,
+                inputs=[file_input, question_input],
+                outputs=[answer_output, report_store, original_store, corrected_store]
+            )
+        
+        # TAB 2: Detailed Correction Report
+        with gr.Tab("📊 Correction Report"):
+            gr.Markdown("""
+            ### Detailed Correction Report
+            This tab shows:
+            - **Total number of changes** made
+            - **What changed** (before → after)
+            - **Context** for each correction
+            - **Side-by-side comparison** of original vs corrected
+            
+            Run a query first, then view the report here!
+            """)
+            
+            refresh_btn = gr.Button("🔄 Refresh Report", variant="secondary")
+            
+            with gr.Row():
+                with gr.Column():
+                    report_display = gr.Textbox(
+                        label="Correction Report",
+                        lines=30,
+                        show_copy_button=True
+                    )
+            
+            with gr.Row():
+                with gr.Column():
+                    original_display = gr.Textbox(
+                        label="Original Answer (Before Correction)",
+                        lines=15,
+                        show_copy_button=True
+                    )
+                with gr.Column():
+                    corrected_display = gr.Textbox(
+                        label="Corrected Answer (After Correction)",
+                        lines=15,
+                        show_copy_button=True
+                    )
+            
+            refresh_btn.click(
+                fn=get_latest_report,
+                inputs=[],
+                outputs=[report_display, original_display, corrected_display]
+            )
+            
+            # Auto-update when new corrections are made
+            report_store.change(
+                fn=lambda x: x,
+                inputs=[report_store],
+                outputs=[report_display]
+            )
+            original_store.change(
+                fn=lambda x: x,
+                inputs=[original_store],
+                outputs=[original_display]
+            )
+            corrected_store.change(
+                fn=lambda x: x,
+                inputs=[corrected_store],
+                outputs=[corrected_display]
+            )
+        
+        
 
 if __name__ == "__main__":
-    iface.launch(share=False)
+    demo.launch(share=False)
