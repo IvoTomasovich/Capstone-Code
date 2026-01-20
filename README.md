@@ -288,5 +288,3 @@ This is an academic project, but suggestions welcome! Key areas for improvement:
 Educational/Academic use only. 
 
 ---
-
-**Questions?** Check the code comments in `transcript_analyzer_fixed.py` for detailed implementation notes.
