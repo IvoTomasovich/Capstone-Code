@@ -11,7 +11,7 @@ This system corrects common transcription errors in meeting transcripts, specifi
 - **Street name errors**: "Tchopitoulous" → "Tchoupitoulas", "Burbon" → "Bourbon"
 - **Title errors**: "Councilmember", "Commissioner", "Mayor"
 
-**Current Accuracy**: ~88% on 96-error test transcript
+**Current Accuracy**: ~85% on 96-error test transcript
 
 ---
 
