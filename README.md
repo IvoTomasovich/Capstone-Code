@@ -252,7 +252,7 @@ Change 3: Tchopitoulous → Tchoupitoulas (90% similar)
 
 ## 🎓 Academic Use
 
-This system was developed as part of a capstone project studying automated transcript correction for municipal meetings. Current accuracy: **~88%** on a 96-error test corpus.
+This system was developed as part of a capstone project studying automated transcript correction for municipal meetings. Current accuracy: **~85%** on a 96-error test corpus.
 
 **Key Findings:**
 - LLM-only approach outperforms hybrid algorithmic+LLM systems
