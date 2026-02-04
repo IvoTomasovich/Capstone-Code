@@ -18,6 +18,41 @@ from typing import Dict, List, Tuple, Optional
 
 
 # ============================================================================
+# GLOBAL VARIABLES
+# ============================================================================
+
+# Global variables for model and dictionaries (lazy loading)
+model_local = None
+dicts = None
+latest_report = {"report": "", "original": "", "corrected": ""}
+latest_accuracy = {"summary": "", "report": "", "has_data": False}
+
+
+# ============================================================================
+# SYSTEM INITIALIZATION
+# ============================================================================
+
+def initialize_system():
+    """Initialize model and dictionaries once (lazy loading)"""
+    global model_local, dicts
+    
+    if model_local is None:
+        print("🔄 Initializing ChatOllama model...")
+        model_local = ChatOllama(
+            model="llama3.1",
+            temperature=0,
+            num_ctx=8192,
+            top_p=1.0,
+        )
+    
+    if dicts is None:
+        print("📚 Loading dictionaries...")
+        dicts = load_dictionaries()
+    
+    return model_local, dicts
+
+
+# ============================================================================
 # DICTIONARY LOADING
 # ============================================================================
 
@@ -89,7 +124,7 @@ def find_potential_name_errors(text: str, dicts: Dict) -> Tuple[List[str], List[
     low_confidence = []
     
     # Look for words after titles that might be names
-    title_words = ['mayor', 'councilmember', 'commissioner', 'dr.', 'mr.', 'ms.']
+    title_words = ['mayor', 'councilmember', 'commissioner', 'dr.', 'mr.', 'ms.', 'mrs.', 'madam', 'miss', 'professor', 'teacher', 'senator', 'representative', 'director']
     
     # Get the original name lists (not the lowercase sets)
     all_names = dicts['names']
@@ -126,7 +161,6 @@ def find_potential_name_errors(text: str, dicts: Dict) -> Tuple[List[str], List[
 
 def llm_correct_with_tracking(text: str, dicts: Dict, llm) -> Tuple[str, List[Dict]]:
     """
-    Single-stage LLM correction with comprehensive change tracking
     
     Args:
         text: Original text to correct
@@ -153,11 +187,54 @@ def llm_correct_with_tracking(text: str, dicts: Dict, llm) -> Tuple[str, List[Di
         word_count = 3000
     
     # Sample glossary terms to include in prompt
-    names_sample = ", ".join(dicts['names'])  # Send ALL names
+    names_sample = ", ".join(dicts['names'])  
     streets_sample = ", ".join(dicts['streets'])
     
     # Find potential name errors using fuzzy matching
     high_conf_errors, low_conf_errors = find_potential_name_errors(text, dicts)
+    
+    # DEBUG: Print what fuzzy search found
+    print(f"\n🔍 FUZZY SEARCH RESULTS:")
+    print(f"   High confidence errors found: {len(high_conf_errors)}")
+    for error in high_conf_errors:
+        print(f"      - {error}")
+    print(f"   Low confidence errors found: {len(low_conf_errors)}")
+    for error in low_conf_errors[:10]:  # Show first 10
+        print(f"      - {error}")
+    
+    # DEBUG: Check for Rogers/Harrison in hints
+    print(f"\n🔍 Checking hints for 'Rogers' or 'Harrison':")
+    found_rogers = False
+    found_harrison = False
+    for error in high_conf_errors + low_conf_errors:
+        if 'rogers' in error.lower():
+            print(f"   ✓ Found: {error}")
+            found_rogers = True
+        if 'harrison' in error.lower():
+            print(f"   ✓ Found: {error}")
+            found_harrison = True
+    if not found_rogers and not found_harrison:
+        print(f"   ✗ Neither 'Rogers' nor 'Harrison' found in hints")
+    
+    # DEBUG: Check context around position 763
+    words = text.split()
+    if len(words) > 763:
+        context_start = max(0, 763 - 30)
+        context_end = min(len(words), 763 + 30)
+        context_words = words[context_start:context_end]
+        
+        print(f"\n🔍 CONTEXT AROUND POSITION 763:")
+        for i, word in enumerate(context_words, start=context_start):
+            marker = " ← TARGET" if i == 763 else ""
+            print(f"   [{i}] {word}{marker}")
+        
+        # Check if Harrison appears nearby
+        context_str = ' '.join(context_words).lower()
+        if 'harrison' in context_str:
+            print(f"\n   ⚠️ WARNING: 'Harrison' appears in nearby context!")
+            harrison_positions = [i for i, w in enumerate(context_words, start=context_start) 
+                                 if 'harrison' in w.lower()]
+            print(f"   Harrison found at positions: {harrison_positions}")
     
     # Build hint section based on confidence
     hints_section = ""
@@ -206,15 +283,17 @@ TEXT TO CORRECT:
 
 CORRECTED TEXT:"""
 
+    # DEBUG: Save prompt for inspection
+    with open('/tmp/llm_prompt_debug.txt', 'w', encoding='utf-8') as f:
+        f.write(prompt)
+    print(f"\n📝 Full prompt saved to /tmp/llm_prompt_debug.txt")
+
     word_count = len(text.split())
     print(f"   📝 Sending {word_count} words to LLM...")
     
     # Warn if too large
     if word_count > 1000:
         print(f"   ⚠️ WARNING: Context is large ({word_count} words). This may take 2-5 minutes.")
-    
-    # DEBUG: Print first 200 chars of what LLM receives
-   
     
     try:
         import time
@@ -329,7 +408,6 @@ def compare_texts_with_diff(original: str, corrected: str) -> List[Dict]:
                 continue
             
             # Skip if words are too different (likely a rewrite, not a correction)
-            # Exception: allow complete changes if they're short (1-2 words)
             word_count = len(orig_clean.split())
             if word_count > 2:
                 similarity = SequenceMatcher(None, orig_clean, corr_clean).ratio()
@@ -437,6 +515,206 @@ def generate_correction_report(original_text: str, corrected_text: str,
     report.append("=" * 80)
     
     return "\n".join(report)
+
+
+# ============================================================================
+# ACCURACY EVALUATION
+# ============================================================================
+
+def calculate_accuracy_from_diffs(original: str, system_corrected: str, ground_truth: str) -> Dict:
+    """
+    Calculate accuracy by reusing compare_texts_with_diff (DRY principle)
+    
+    Args:
+        original: Original text with errors
+        system_corrected: Your system's corrected version
+        ground_truth: Manually corrected ground truth
+    
+    Returns:
+        Dictionary with accuracy metrics
+    """
+    
+    # What SHOULD have been corrected (ground truth)
+    true_corrections = compare_texts_with_diff(original, ground_truth)
+    
+    # What YOUR SYSTEM actually corrected
+    system_corrections = compare_texts_with_diff(original, system_corrected)
+    
+    # Now compare the two lists
+    true_positives = []
+    false_negatives = []
+    false_positives = []
+    
+    # Create lookup of system corrections by position
+    system_by_pos = {change['position']: change for change in system_corrections}
+    
+    # Check each true error
+    for true_change in true_corrections:
+        pos = true_change['position']
+        
+        if pos in system_by_pos:
+            system_change = system_by_pos[pos]
+            
+            # Compare what system corrected vs what it should be
+            if system_change['corrected'].lower().strip() == true_change['corrected'].lower().strip():
+                # Correct!
+                true_positives.append({
+                    'position': pos,
+                    'original': true_change['original'],
+                    'ground_truth': true_change['corrected'],
+                    'system': system_change['corrected'],
+                    'context': system_change['context'],
+                    'status': 'CORRECT'
+                })
+            else:
+                # System tried but got it wrong
+                false_negatives.append({
+                    'position': pos,
+                    'original': true_change['original'],
+                    'should_be': true_change['corrected'],
+                    'system_said': system_change['corrected'],
+                    'context': system_change['context'],
+                    'status': 'WRONG_FIX'
+                })
+        else:
+            # System didn't correct this error
+            false_negatives.append({
+                'position': pos,
+                'original': true_change['original'],
+                'should_be': true_change['corrected'],
+                'system_said': true_change['original'],  # Unchanged
+                'context': true_change['context'],
+                'status': 'MISSED'
+            })
+    
+    # Check for false positives (system changed something that shouldn't be changed)
+    true_positions = {change['position'] for change in true_corrections}
+    
+    for system_change in system_corrections:
+        pos = system_change['position']
+        if pos not in true_positions:
+            false_positives.append({
+                'position': pos,
+                'original': system_change['original'],
+                'system_changed_to': system_change['corrected'],
+                'context': system_change['context'],
+                'status': 'UNNECESSARY_CHANGE'
+            })
+    
+    # Calculate metrics
+    total_errors = len(true_corrections)
+    correctly_fixed = len(true_positives)
+    
+    accuracy = (correctly_fixed / total_errors * 100) if total_errors > 0 else 0
+    precision = (correctly_fixed / (correctly_fixed + len(false_positives))) * 100 if (correctly_fixed + len(false_positives)) > 0 else 0
+    recall = (correctly_fixed / total_errors * 100) if total_errors > 0 else 0
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'total_errors': total_errors,
+        'correctly_fixed': correctly_fixed,
+        'missed': len([fn for fn in false_negatives if fn['status'] == 'MISSED']),
+        'wrong_fixes': len([fn for fn in false_negatives if fn['status'] == 'WRONG_FIX']),
+        'false_positives': len(false_positives),
+        'true_positives': true_positives,
+        'false_negatives': false_negatives,
+        'false_positives_list': false_positives
+    }
+
+
+def generate_dual_accuracy_report(baseline_metrics: Dict, system_metrics: Dict, improvement: float) -> str:
+    """Generate detailed accuracy report comparing baseline vs system"""
+    
+    report = []
+    report.append("=" * 80)
+    report.append("DUAL ACCURACY EVALUATION REPORT")
+    report.append("=" * 80)
+    report.append("")
+    
+    # Baseline Section
+    report.append("BASELINE (Original Transcript - No Corrections)")
+    report.append("-" * 80)
+    report.append(f"Total Errors Detected:  {baseline_metrics['total_errors']}")
+    report.append(f"Baseline Accuracy:      0.00% (no corrections applied)")
+    report.append("")
+    report.append("This represents how many errors exist in the original transcript.")
+    report.append("")
+    
+    # System Performance Section
+    report.append("SYSTEM PERFORMANCE (After Correction Pipeline)")
+    report.append("-" * 80)
+    report.append(f"Accuracy:          {system_metrics['accuracy']:.2f}%")
+    report.append(f"Precision:         {system_metrics['precision']:.2f}%")
+    report.append(f"Recall:            {system_metrics['recall']:.2f}%")
+    report.append("")
+    report.append(f"Total errors:      {system_metrics['total_errors']}")
+    report.append(f"Correctly fixed:   {system_metrics['correctly_fixed']}")
+    report.append(f"Missed:            {system_metrics['missed']}")
+    report.append(f"Wrong fixes:       {system_metrics['wrong_fixes']}")
+    report.append(f"False positives:   {system_metrics['false_positives']}")
+    report.append("")
+    
+    # Improvement Section
+    report.append("IMPROVEMENT ANALYSIS")
+    report.append("-" * 80)
+    report.append(f"Improvement:       +{improvement:.2f}%")
+    report.append(f"Error Reduction:   {system_metrics['correctly_fixed']} / {system_metrics['total_errors']} errors fixed")
+    
+    if improvement > 80:
+        report.append(f"Assessment:        EXCELLENT - System fixes most errors")
+    elif improvement > 60:
+        report.append(f"Assessment:        GOOD - System fixes majority of errors")
+    elif improvement > 40:
+        report.append(f"Assessment:        FAIR - System fixes some errors")
+    else:
+        report.append(f"Assessment:        NEEDS IMPROVEMENT - Many errors missed")
+    
+    report.append("")
+    
+    # Correctly Fixed - SHOW ALL
+    if system_metrics['true_positives']:
+        report.append("CORRECTLY FIXED ERRORS")
+        report.append("-" * 80)
+        for i, tp in enumerate(system_metrics['true_positives'], 1):  # Show ALL
+            report.append(f"{i}. Position {tp['position']}:")
+            report.append(f"   Original:     '{tp['original']}'")
+            report.append(f"   Ground Truth: '{tp['ground_truth']}'")
+            report.append(f"   System:       '{tp['system']}' ✓")
+        report.append("")
+    
+    # Missed Errors - SHOW ALL
+    if system_metrics['false_negatives']:
+        report.append("❌ MISSED OR WRONGLY FIXED ERRORS")
+        report.append("-" * 80)
+        for i, fn in enumerate(system_metrics['false_negatives'], 1):  # Show ALL
+            report.append(f"{i}. Position {fn['position']} - {fn['status']}:")
+            report.append(f"   Original:     '{fn['original']}'")
+            report.append(f"   Should be:    '{fn['should_be']}'")
+            report.append(f"   System said:  '{fn['system_said']}'")
+        report.append("")
+    
+    # False Positives - SHOW ALL
+    if system_metrics['false_positives_list']:
+        report.append("FALSE POSITIVES (Unnecessary Changes)")
+        report.append("-" * 80)
+        for i, fp in enumerate(system_metrics['false_positives_list'], 1):  # Show ALL
+            report.append(f"{i}. Position {fp['position']}:")
+            report.append(f"   Original (correct): '{fp['original']}'")
+            report.append(f"   System changed to:  '{fp['system_changed_to']}'")
+        report.append("")
+    
+    report.append("=" * 80)
+    
+    return "\n".join(report)
+
+
+def get_latest_accuracy():
+    """Retrieve the latest accuracy evaluation"""
+    if not latest_accuracy["has_data"]:
+        return "No accuracy evaluation available yet.\n\nTo generate an accuracy report:\n1. Go to 'Ask Questions' tab\n2. Upload BOTH an error transcript AND a ground truth file\n3. Ask a question\n4. Return to this tab to see the accuracy results", ""
+    return latest_accuracy["summary"], latest_accuracy["report"]
 
 
 # ============================================================================
@@ -563,25 +841,13 @@ def load_json_transcript(file_path):
 # MAIN PROCESSING FUNCTION
 # ============================================================================
 
-# Global variable to store latest report
-latest_report = {"report": "", "original": "", "corrected": ""}
-
-def process_documents(files, question):
+def process_documents(files, ground_truth_file, question):
     """Process uploaded documents with LLM-only correction pipeline"""
     
-    global latest_report
+    global latest_report, latest_accuracy
     
-    print("🔄 Initializing ChatOllama model...")
-    
-    model_local = ChatOllama(
-        model="llama3.1",
-        temperature=0,
-        num_ctx=8192,
-        top_p=0.9,
-    )
-    
-    print("\n📚 Loading dictionaries...")
-    dicts = load_dictionaries()
+    # Use shared initialization instead of recreating
+    model_local, dicts = initialize_system()
     
     # Load documents
     all_docs = []
@@ -697,6 +963,83 @@ ANSWER:"""
     # Print to terminal
     print("\n" + report)
     
+    # If ground truth file was provided, calculate accuracy
+    if ground_truth_file is not None:
+        print("\n" + "="*80)
+        print("🎯 CALCULATING ACCURACY (Ground Truth Provided)")
+        print("="*80)
+        
+        # Load ground truth
+        if ground_truth_file.name.endswith('.json'):
+            truth_docs = load_json_transcript(ground_truth_file.name)
+        elif ground_truth_file.name.endswith('.txt'):
+            truth_docs = load_text_file(ground_truth_file.name)
+        else:
+            print("⚠️ Ground truth file must be JSON or TXT - skipping accuracy evaluation")
+            latest_accuracy["has_data"] = False
+        
+        if ground_truth_file.name.endswith('.json') or ground_truth_file.name.endswith('.txt'):
+            ground_truth = truth_docs[0].page_content
+            
+            # Use the original full_text as the "error" version
+            original_errors = full_text
+            
+            print(f"   📄 Error transcript: {len(original_errors.split())} words")
+            print(f"   📄 Ground truth: {len(ground_truth.split())} words")
+            
+            # Calculate baseline (how many errors exist)
+            print("   📊 Step 1: Calculating baseline...")
+            baseline_metrics = calculate_accuracy_from_diffs(original_errors, original_errors, ground_truth)
+            
+            # Calculate system accuracy (how well we did)
+            print("   📊 Step 2: Calculating system accuracy...")
+            system_metrics = calculate_accuracy_from_diffs(original_errors, corrected_context, ground_truth)
+            
+            # Calculate improvement
+            improvement = system_metrics['accuracy']
+            
+            # Generate reports
+            accuracy_report = generate_dual_accuracy_report(baseline_metrics, system_metrics, improvement)
+            
+            accuracy_summary = f"""
+ACCURACY EVALUATION COMPLETE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 BASELINE (Original Transcript)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total Errors in Original: {baseline_metrics['total_errors']}
+Baseline Accuracy: 0.00% (no corrections applied)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🤖 SYSTEM PERFORMANCE (After Your Corrections)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+System Accuracy:  {system_metrics['accuracy']:.2f}%
+Precision:        {system_metrics['precision']:.2f}%
+Recall:           {system_metrics['recall']:.2f}%
+
+Correctly Fixed:  {system_metrics['correctly_fixed']} / {system_metrics['total_errors']}
+Missed:           {system_metrics['missed']}
+Wrong Fixes:      {system_metrics['wrong_fixes']}
+False Positives:  {system_metrics['false_positives']}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 IMPROVEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Improvement: +{improvement:.2f}% (from 0% to {system_metrics['accuracy']:.2f}%)
+
+Switch to the '🎯 Accuracy Evaluation' tab to see detailed results.
+"""
+            
+            # Store in global variable
+            latest_accuracy["summary"] = accuracy_summary
+            latest_accuracy["report"] = accuracy_report
+            latest_accuracy["has_data"] = True
+            
+            print("\n Accuracy evaluation complete!")
+    else:
+        # No ground truth provided
+        latest_accuracy["has_data"] = False
+    
     # Return for display
     summary = f"\n\n{'='*80}\n📊 {len(context_changes)} corrections made to source context.\n{'='*80}"
     
@@ -718,14 +1061,27 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 📄 Meeting Transcript Analyzer with LLM Correction")
     
     with gr.Tabs():
-        # TAB 1: Main Q&A Interface
+        # TAB 1: Main Q&A Interface (NOW WITH GROUND TRUTH OPTION)
         with gr.Tab("📝 Ask Questions"):
+            gr.Markdown("""
+            ### Upload Transcripts and Ask Questions
+            
+            **Required:** Upload at least one transcript file.
+            
+            **Optional:** Upload a ground truth file to evaluate accuracy (see results in the "🎯 Accuracy Evaluation" tab).
+            """)
+            
             with gr.Row():
                 with gr.Column():
                     file_input = gr.File(
-                        label="Upload Meeting Transcripts (JSON, PDF, TXT)",
+                        label="📄 Transcript(s) to Process (JSON, PDF, TXT)",
                         file_count="multiple",
                         file_types=[".json", ".pdf", ".txt"]
+                    )
+                    ground_truth_input = gr.File(
+                        label="✅ Ground Truth (Optional - for accuracy evaluation)",
+                        file_count="single",
+                        file_types=[".json", ".txt"]
                     )
                     question_input = gr.Textbox(
                         label="Ask a question about your documents",
@@ -748,7 +1104,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             
             submit_btn.click(
                 fn=process_documents,
-                inputs=[file_input, question_input],
+                inputs=[file_input, ground_truth_input, question_input],
                 outputs=[answer_output, report_store, original_store, corrected_store]
             )
         
@@ -812,6 +1168,52 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 outputs=[corrected_display]
             )
         
+        # TAB 3: Accuracy Evaluation (VIEW ONLY)
+        with gr.Tab("🎯 Accuracy Evaluation"):
+            gr.Markdown("""
+            ### System Accuracy Report
+            
+            This tab shows how well your correction system performed compared to a manually corrected "ground truth" version.
+            
+            **To generate an accuracy report:**
+            1. Go to the "📝 Ask Questions" tab
+            2. Upload your transcript file(s) as normal
+            3. **Also upload a ground truth file** (manually corrected version)
+            4. Ask your question
+            5. Return here to see detailed accuracy metrics
+            
+            **The report includes:**
+            - Baseline accuracy (how many errors existed originally)
+            - System accuracy (how many errors your system fixed)
+            - Precision, recall, and overall improvement
+            - List of correctly fixed errors
+            - List of missed errors
+            - List of false positives (unnecessary changes)
+            """)
+            
+            refresh_accuracy_btn = gr.Button("🔄 Refresh Accuracy Report", variant="secondary")
+            
+            with gr.Row():
+                with gr.Column():
+                    accuracy_summary_display = gr.Textbox(
+                        label="Accuracy Summary",
+                        lines=18,
+                        show_copy_button=True
+                    )
+            
+            with gr.Row():
+                with gr.Column():
+                    accuracy_report_display = gr.Textbox(
+                        label="📋 Detailed Accuracy Report",
+                        lines=30,
+                        show_copy_button=True
+                    )
+            
+            refresh_accuracy_btn.click(
+                fn=get_latest_accuracy,
+                inputs=[],
+                outputs=[accuracy_summary_display, accuracy_report_display]
+            )
         
 
 if __name__ == "__main__":
